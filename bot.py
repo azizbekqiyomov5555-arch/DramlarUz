@@ -29,7 +29,7 @@ from telegram.ext import (
 )
 
 # ─── KONFIGURATSIYA ────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8745952988:AAHCdqyNsKX-uLz5YFwj_nVU8NXUG25B-kc"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8723400610:AAHiYOyPlTNC8msWD_IZabGSWgB3cPDmV8Q"
 ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "8773744297")
 
 DATABASE_URL      = os.environ.get("DATABASE_URL") or ""

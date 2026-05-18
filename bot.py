@@ -29,8 +29,8 @@ from telegram.ext import (
 )
 
 # ─── KONFIGURATSIYA ────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8774359442:AAEApB-fmte2uSCFGUPrOSpx1FlKX8Wau08"
-ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "7812447850")
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8723400610:AAHiYOyPlTNC8msWD_IZabGSWgB3cPDmV8Q"
+ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "8537782289")
 
 DATABASE_URL      = os.environ.get("DATABASE_URL") or ""
 JSONBLOB_URL      = ""   # O'chirildi — PostgreSQL ishlatilmoqda

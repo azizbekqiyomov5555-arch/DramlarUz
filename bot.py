@@ -32,7 +32,7 @@ from telegram.ext import (
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8723400610:AAHiYOyPlTNC8msWD_IZabGSWgB3cPDmV8Q"
 ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "8537782289")
 
-DATABASE_URL      = os.environ.get("DATABASE_URL") or ""
+DATABASE_URL      = ("postgresql://postgres:qckcYuZlQBpLiRFTgkTmmMkLKNXYMGVY@postgres.railway.internal:5432/railway") or ""
 JSONBLOB_URL      = ""   # O'chirildi — PostgreSQL ishlatilmoqda
 GSHEET_ID         = os.environ.get("GSHEET_ID")    or "1Lodn9MTb7nysq5l80cQVCu9IKfgQRlnNe654PT0hKQs"
 

@@ -30,15 +30,15 @@ from telegram.ext import (
 
 # ─── KONFIGURATSIYA ────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8723400610:AAFOonUirSoYYE4-gVVmUCacYIcUHEWXQzU"
-ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "7812447850")
+ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "8537782289")
 
 DATABASE_URL      = os.environ.get("DATABASE_URL") or ""
 JSONBLOB_URL      = ""   # O'chirildi — PostgreSQL ishlatilmoqda
 GSHEET_ID         = os.environ.get("GSHEET_ID")    or "1Lodn9MTb7nysq5l80cQVCu9IKfgQRlnNe654PT0hKQs"
 
 # ─── CHECKCARD API KONFIGURATSIYASI ─────────────────────────
-CHECKCARD_SHOP_ID  = os.environ.get("CHECKCARD_SHOP_ID")  or "924672"
-CHECKCARD_SHOP_KEY = os.environ.get("CHECKCARD_SHOP_KEY") or "DSSD85MU60"
+CHECKCARD_SHOP_ID  = os.environ.get("CHECKCARD_SHOP_ID")  or "249444"
+CHECKCARD_SHOP_KEY = os.environ.get("CHECKCARD_SHOP_KEY") or "ZB3GJ99FI5"
 CHECKCARD_BASE_URL = "https://checkcard.uz/api"
 
 # ─── RAILWAY / WEBHOOK KONFIGURATSIYASI ─────────────────────

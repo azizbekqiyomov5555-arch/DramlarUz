@@ -7262,17 +7262,28 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_now()
 
         exp_dt = ts_to_tashkent(new_until)
+        # Avvalgi premium muddati bor edi yoki yo'q
+        was_premium = current_until > now
+        if was_premium:
+            old_dt = ts_to_tashkent(current_until)
+            premium_info = (
+                f"\n⏮ Oldingi muddat: <b>{old_dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+                f"➕ Ustiga <b>{plan['days']} kun</b> qo'shildi"
+            )
+        else:
+            premium_info = f"\n⏳ Muddat: <b>{plan['days']} kun</b>"
+
         text = (
-            f"🎉 <b>Premium muvaffaqiyatli ulandi!</b>\n\n"
-            f"💎 Tarif: <b>{plan['name']}</b>\n"
-            f"⏳ Muddat: <b>{plan['days']} kun</b>\n"
-            f"📅 Tugash vaqti: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+            f"🎊 <b>Tabriklaymiz!</b>\n\n"
+            f"💎 Siz <b>{plan['name']}</b> Premium obunasini muvaffaqiyatli sotib oldingiz!\n"
+            f"{premium_info}\n"
+            f"📅 Amal qilish muddati: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha\n\n"
             f"💰 Qolgan balans: <b>{u_data['balance']:,} so'm</b>\n\n"
             f"✅ Endi barcha kinolar <b>bepul</b>! Tomosha qiling! 🎬"
         )
         try:
             await q.edit_message_text(text, parse_mode="HTML",
-                                      reply_markup=ikb([[ibtn("🔙 Bosh menyu", data="go_home")]]))
+                                      reply_markup=ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]]));
         except Exception:
             await context.bot.send_message(uid, text, parse_mode="HTML")
 
@@ -7280,12 +7291,15 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             u_name = u_data.get("name") or f"ID:{uid}"
             u_uname = u_data.get("username") or ""
+            uname_str = f"@{u_uname}" if u_uname else "username yo'q"
             adm_txt = (
-                f"💎 <b>Premium sotildi!</b>\n\n"
-                f"👤 {u_name} (@{u_uname} | <code>{uid}</code>)\n"
-                f"📦 Tarif: <b>{plan['name']}</b> — {plan['days']} kun\n"
+                f"💎 <b>Yangi Premium sotildi!</b>\n\n"
+                f"👤 Foydalanuvchi: <b>{u_name}</b>\n"
+                f"🔗 {uname_str} | <code>{uid}</code>\n\n"
+                f"📦 Tarif: <b>{plan['name']}</b>\n"
+                f"⏳ Muddat: <b>{plan['days']} kun</b>\n"
                 f"💵 To'langan: <b>{plan['price']:,} so'm</b>\n"
-                f"📅 Tugash: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>"
+                f"📅 Amal qilish muddati: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha"
             )
             await context.bot.send_message(ADMIN_ID, adm_txt, parse_mode="HTML")
         except Exception:

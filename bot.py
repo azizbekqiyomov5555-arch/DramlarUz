@@ -3401,6 +3401,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  main_menu_kb(is_admin=(is_any_admin(uid))))
         return
 
+    if data == "go_movies":
+        await q.answer()
+        try: await q.delete_message()
+        except: pass
+        await _send_kino_list_page(context.bot, uid, page=0)
+        return
+
     if data == "waiting_confirm":
         await q.answer("Admin ko'rib chiqmoqda, sabrli bo'ling!", show_alert=True)
         return
@@ -7283,7 +7290,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await q.edit_message_text(text, parse_mode="HTML",
-                                      reply_markup=ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]]));
+                                      reply_markup=ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]]))
         except Exception:
             await context.bot.send_message(uid, text, parse_mode="HTML")
 

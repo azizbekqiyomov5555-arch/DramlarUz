@@ -7167,10 +7167,10 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q   = update.callback_query
     uid = q.from_user.id
     data = q.data or ""
-    await q.answer()
 
     # ── Foydalanuvchiga tariflar ro'yxatini ko'rsat ──
     if data == "premium_plans_show":
+        await q.answer()
         plans = RAM.premium_plans or []
         u_data = RAM.ensure_user(uid)
         prem_until = float(u_data.get("premium_until") or 0)
@@ -7288,11 +7288,15 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 Qolgan balans: <b>{u_data['balance']:,} so'm</b>\n\n"
             f"✅ Endi barcha kinolar <b>bepul</b>! Tomosha qiling! 🎬"
         )
+        kb_buy = ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]])
         try:
-            await q.edit_message_text(text, parse_mode="HTML",
-                                      reply_markup=ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]]))
+            await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb_buy)
         except Exception:
-            await context.bot.send_message(uid, text, parse_mode="HTML")
+            try:
+                await q.delete_message()
+            except Exception:
+                pass
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb_buy)
 
         # Adminga xabar
         try:

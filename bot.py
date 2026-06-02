@@ -11,11 +11,9 @@ from io import BytesIO
 TZ_TASHKENT = timezone(timedelta(hours=5))
 
 def now_tashkent() -> datetime:
-    """Hozirgi vaqtni Toshkent (UTC+5) timezone bilan qaytaradi."""
     return datetime.now(tz=TZ_TASHKENT)
 
 def ts_to_tashkent(ts) -> datetime:
-    """Unix timestamp ni Toshkent vaqtiga o'tkazadi."""
     return ts_to_tashkent(float(ts), tz=TZ_TASHKENT)
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -828,14 +826,6 @@ def _merge_db(blob: dict | None, local: dict | None) -> dict:
             merged["premium_until"] = max(p_b, p_l)
             merged_users[uid_key] = merged
 
-    # Boshqa maydonlar — lokal ustun, bo'lmasa blob
-    def pick(key, default):
-        if key in local and local.get(key):
-            return local.get(key)
-        if key in blob and blob.get(key):
-            return blob.get(key)
-        return default
-
     # premium_plans — ikkalasini birlashtir (id bo'yicha dedup)
     blob_plans  = blob.get("premium_plans",  []) or []
     local_plans = list(local.get("premium_plans", []) or [])
@@ -847,6 +837,14 @@ def _merge_db(blob: dict | None, local: dict | None) -> dict:
         merged_plans = local_plans
     else:
         merged_plans = blob_plans
+
+    # Boshqa maydonlar — lokal ustun, bo'lmasa blob
+    def pick(key, default):
+        if key in local and local.get(key):
+            return local.get(key)
+        if key in blob and blob.get(key):
+            return blob.get(key)
+        return default
 
     return {
         "movies":           merged_movies,
@@ -939,8 +937,7 @@ def db_initial_load():
     blob_eps  = sum(len(m.get("episodes", []) or []) for m in (blob.get("movies")  or {}).values()) if has_blob  else 0
     local_eps = sum(len(m.get("episodes", []) or []) for m in (local.get("movies") or {}).values()) if has_local else 0
     merged_eps = sum(len(m.get("episodes", []) or []) for m in RAM.movies.values())
-    logger.info(f"✅ Birlashtirildi → RAM: {len(RAM.movies)} kino, {merged_eps} qism, "
-                f"{len(RAM.users)} user, {len(RAM.premium_plans)} pryum tarif "
+    logger.info(f"✅ Birlashtirildi → RAM: {len(RAM.movies)} kino, {merged_eps} qism, {len(RAM.users)} user "
                 f"(blob: {len(blob.get('movies',{}) if has_blob else {})}/{blob_eps}, "
                 f"lokal: {len(local.get('movies',{}) if has_local else {})}/{local_eps})")
 
@@ -2514,7 +2511,13 @@ def _parse_ts(value) -> float:
 
 def _tashkent_now_str() -> str:
     """Toshkent vaqtini (UTC+5) chiroyli formatda qaytaradi."""
-    return now_tashkent().strftime("%d.%m.%Y  %H:%M:%S")
+    try:
+        import datetime as _dt
+        utc_now = _dt.datetime.utcnow()
+        tashkent = utc_now + _dt.timedelta(hours=5)
+        return tashkent.strftime("%d.%m.%Y  %H:%M:%S")
+    except Exception:
+        return now_tashkent().strftime("%d.%m.%Y %H:%M:%S")
 
 
 def _get_today_payments() -> list:
@@ -7183,6 +7186,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not plan:
             await q.answer("Tarif topilmadi!", show_alert=True)
             return
+        await q.answer()
         u_data  = RAM.ensure_user(uid)
         balance = int(u_data.get("balance") or 0)
         enough  = balance >= plan["price"]
@@ -7228,6 +7232,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if balance < plan["price"]:
             await q.answer("Balansingiz yetarli emas!", show_alert=True)
             return
+        await q.answer()
         # Pulni ayiramiz
         u_data["balance"] = balance - plan["price"]
         # Premium muddatini qo'shamiz (agar avval ham premium bo'lsa — ustiga qo'shamiz)
@@ -7274,6 +7279,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Tariflar ro'yxatini yopish ──
     if data == "premium_plans_close":
+        await q.answer()
         try: await q.delete_message()
         except Exception: pass
         return
@@ -7281,6 +7287,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Admin: yangi tarif qo'shish ──
     if data == "add_premium_plan":
         if not is_any_admin(uid): return
+        await q.answer()
         context.user_data["admin_state"] = "add_premium_plan_name"
         try: await q.edit_message_reply_markup(reply_markup=None)
         except: pass

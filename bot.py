@@ -7261,8 +7261,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u_data["premium_until"] = new_until
         await save_now()
 
-        import datetime as _dt
-        exp_dt = _dt.ts_to_tashkent(new_until)
+        exp_dt = ts_to_tashkent(new_until)
         text = (
             f"🎉 <b>Premium muvaffaqiyatli ulandi!</b>\n\n"
             f"💎 Tarif: <b>{plan['name']}</b>\n"

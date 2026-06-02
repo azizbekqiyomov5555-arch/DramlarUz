@@ -82,6 +82,7 @@ class RamCache:
         self.emoji_ids: dict = {}
         self.sub_admins: dict = {}   # {uid_str: {"perms": {key: bool}}}
         self.blocked_users: dict = {}  # {uid_str: {"blocked_at": timestamp, "by": admin_uid}}
+        self.premium_plans: list = []  # [{id, name, days, price, description}]
         self.loaded: bool   = False  # bazadan yuklandi?
 
     # ── Barcha ma'lumotlarni dict ga ──────────────────────
@@ -100,6 +101,7 @@ class RamCache:
                 "emoji_ids":        copy.deepcopy(self.emoji_ids),
                 "sub_admins":       copy.deepcopy(self.sub_admins),
                 "blocked_users":    copy.deepcopy(self.blocked_users),
+                "premium_plans":    copy.deepcopy(self.premium_plans),
             }
 
     # ── Dict dan yuklash ──────────────────────────────────
@@ -130,6 +132,7 @@ class RamCache:
             self.emoji_ids        = data.get("emoji_ids", {}) or {}
             self.sub_admins       = data.get("sub_admins", {}) or {}
             self.blocked_users    = data.get("blocked_users", {}) or {}
+            self.premium_plans    = data.get("premium_plans", []) or []
             self.loaded           = True
 
     # ── Kino operatsiyalari ───────────────────────────────
@@ -493,6 +496,7 @@ DEFAULT_BTN = {
     "foydalanuvchi_blok": _B('🚫 Foydalanuvchi bloklash'),
     "tolovlar":           _B("💸 Foydalanuvchi to'lovlari"),
     "admin_panel":        _B("Admin panel"),
+    "premium_plan_manage": _B("💎 Pryum tariflar"),
     "post_nomi":          "🎭",
     "post_qism":          "🎞",
     "post_kod":           "🔑",
@@ -565,6 +569,7 @@ BTN_LABELS["post_bot"]     = "Post: Bot emoji"
 BTN_LABELS["post_korish"]  = "Post: Ko\'rish emoji"
 BTN_LABELS["hisob_toldirish"] = "Hisobni to\'ldirish tugmasi"
 BTN_LABELS["kanal_btn"]    = "Kanal tugmasi"
+BTN_LABELS["premium_plan_manage"] = "Pryum tariflar boshqaruvi"
 LABEL_TO_KEY = {v: k for k, v in BTN_LABELS.items()}
 
 # ══════════════════════════════════════════════════════════
@@ -1372,6 +1377,7 @@ def admin_menu_kb(uid=None):
         ("start_xab",      "primary"),
         ("qism_och",       "success"),
         ("foydalanuvchi_blok", "danger"),
+        ("premium_plan_manage", "success"),
     ]
     if uid is not None and not is_super_admin(uid):
         pairs = [(k, st) for (k, st) in pairs if has_perm(uid, k)]
@@ -1682,6 +1688,7 @@ def balans_kb():
     """Foydalanuvchi balans sahifasi inline klaviaturasi."""
     return ikb([[
         ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
+        ibtn("💎 Pryum olish", data="premium_plans_show", style="primary"),
     ]])
 
 
@@ -3389,10 +3396,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════════
+    # 💎 PREMIUM TARIFLAR callbacklari
+    # ══════════════════════════════════════════════
+    if data in ("premium_plans_show", "premium_plans_close", "add_premium_plan", "go_admin_panel") \
+            or data.startswith("premium_plan_info|") \
+            or data.startswith("premium_plan_buy|") \
+            or data.startswith("del_premium_plan|"):
+        await cb_premium_plans(update, context)
+        return
+
+    # ══════════════════════════════════════════════
     # BALANS TO'LDIRISH — foydalanuvchi callbacklari
     # ══════════════════════════════════════════════
     if data == "topup_start":
-        # Foydalanuvchi "Hisobni to'ldirish" tugmasini bosdi
         context.user_data["admin_state"] = "topup_amount"
         # Balans xabarini o'chiramiz
         balans_msg_id = context.user_data.pop("balans_msg_id", None)
@@ -4615,7 +4631,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "emoji_soz", "asosiy", "boshqarish", "broadcast", "kino_uch",
             "kino_kanal_set", "qism_tahrir", "admin_qosh",
             "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
-            "tolovlar",
+            "tolovlar", "premium_plan_manage",
         ]
         # Ham to'liq matn, ham emoji-siz matn bilan tekshiramiz
         all_admin_btns = {}
@@ -4855,6 +4871,11 @@ async def admin_buttons(update, context, text: str):
         except Exception as e:
             logger.error(f"tolovlar ko'rsatishda xato: {e}")
             await sm(context.bot, uid, "❌ To'lovlarni ko'rsatishda xato yuz berdi.", admin_menu_kb(uid))
+        return
+
+    if _btn_match("premium_plan_manage"):
+        if not is_any_admin(uid): return
+        await _send_premium_plans_admin(context.bot, uid)
         return
 
     if _btn_match("karta"):
@@ -5547,6 +5568,65 @@ async def admin_state_handler(update, context, text: str) -> bool:
             f"💸 Ayirildi: <b>{actually_removed:,} so'm</b>\n"
             f"💳 Yangi balans: <b>{new_balance:,} so'm</b>",
             admin_menu_kb(uid))
+        return True
+
+    # ── Premium plan qo'shish: nom ──
+    if state == "add_premium_plan_name":
+        if not is_any_admin(uid): clear_admin_state(context); return True
+        context.user_data["new_plan_name"] = text.strip()
+        context.user_data["admin_state"]   = "add_premium_plan_days"
+        await sm(context.bot, uid,
+            f"💎 Tarif nomi: <b>{text.strip()}</b>\n\n"
+            f"Endi necha <b>kun</b> ekanini kiriting (masalan: 30):")
+        return True
+
+    # ── Premium plan qo'shish: kunlar ──
+    if state == "add_premium_plan_days":
+        if not is_any_admin(uid): clear_admin_state(context); return True
+        if not text.strip().isdigit() or int(text.strip()) <= 0:
+            await sm(context.bot, uid, "❌ Faqat musbat <b>raqam</b> (kun) kiriting:")
+            return True
+        context.user_data["new_plan_days"] = int(text.strip())
+        context.user_data["admin_state"]   = "add_premium_plan_price"
+        await sm(context.bot, uid,
+            f"⏳ Muddati: <b>{text.strip()} kun</b>\n\n"
+            f"Endi <b>narxini</b> kiriting (so'mda, masalan: 15000):")
+        return True
+
+    # ── Premium plan qo'shish: narx ──
+    if state == "add_premium_plan_price":
+        if not is_any_admin(uid): clear_admin_state(context); return True
+        if not text.strip().isdigit() or int(text.strip()) <= 0:
+            await sm(context.bot, uid, "❌ Faqat musbat <b>narx</b> kiriting (so'mda):")
+            return True
+        context.user_data["new_plan_price"] = int(text.strip())
+        context.user_data["admin_state"]    = "add_premium_plan_desc"
+        await sm(context.bot, uid,
+            f"💵 Narxi: <b>{int(text.strip()):,} so'm</b>\n\n"
+            f"Tarif haqida <b>qisqacha tavsif</b> yozing (yoki <code>-</code> yuboring o'tkazib yuborish uchun):")
+        return True
+
+    # ── Premium plan qo'shish: tavsif ──
+    if state == "add_premium_plan_desc":
+        if not is_any_admin(uid): clear_admin_state(context); return True
+        desc = text.strip()
+        if desc == "-": desc = ""
+        name  = context.user_data.pop("new_plan_name",  "Tarif")
+        days  = context.user_data.pop("new_plan_days",  30)
+        price = context.user_data.pop("new_plan_price", 0)
+        import uuid as _uuid
+        plan_id = str(_uuid.uuid4())[:8]
+        new_plan = {"id": plan_id, "name": name, "days": days, "price": price, "description": desc}
+        RAM.premium_plans.append(new_plan)
+        await save_now()
+        clear_admin_state(context)
+        await sm(context.bot, uid,
+            f"✅ <b>Tarif qo'shildi!</b>\n\n"
+            f"💎 Nom: <b>{name}</b>\n"
+            f"⏳ Muddat: <b>{days} kun</b>\n"
+            f"💵 Narx: <b>{price:,} so'm</b>\n"
+            f"📝 Tavsif: {desc or '—'}")
+        await _send_premium_plans_admin(context.bot, uid)
         return True
 
     if state == "add_admin_id":
@@ -6994,6 +7074,225 @@ async def _checkcard_poll_job(context):
 
     except Exception as e:
         logger.error(f"_checkcard_poll_job xato: {e}")
+
+
+# ══════════════════════════════════════════════════════════
+# 💎 PREMIUM TARIFLAR — ADMIN PANEL + FOYDALANUVCHI
+# ══════════════════════════════════════════════════════════
+
+async def _send_premium_plans_admin(bot, chat_id: int):
+    """Adminга premium tariflar ro'yxatini ko'rsatadi."""
+    plans = RAM.premium_plans or []
+    if not plans:
+        text = (
+            "💎 <b>Premium tariflar</b>\n\n"
+            "Hozircha hech qanday tarif qo'shilmagan.\n\n"
+            "➕ Yangi tarif qo'shish uchun tugmani bosing:"
+        )
+    else:
+        lines = ["💎 <b>Premium tariflar</b>\n"]
+        for i, p in enumerate(plans, 1):
+            lines.append(
+                f"<b>{i}. {p['name']}</b>\n"
+                f"   ⏳ Muddat: <b>{p['days']} kun</b>\n"
+                f"   💵 Narx: <b>{p['price']:,} so'm</b>\n"
+                f"   📝 {p.get('description') or '—'}\n"
+            )
+        text = "\n".join(lines)
+
+    rows = []
+    for p in plans:
+        rows.append([ibtn(f"🗑 {p['name']} ({p['days']}k) o'chirish",
+                          data=f"del_premium_plan|{p['id']}", style="danger")])
+    rows.append([ibtn("➕ Yangi tarif qo'shish", data="add_premium_plan", style="success")])
+    rows.append([ibtn("🔙 Admin panel", data="go_admin_panel", style="primary")])
+    await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=ikb(rows))
+
+
+def _premium_plans_user_kb(plans: list):
+    """Foydalanuvchiga tariflar ro'yxati — har biri alohida tugma."""
+    rows = []
+    for p in plans:
+        rows.append([ibtn(
+            f"💎 {p['name']} — {p['price']:,} so'm ({p['days']} kun)",
+            data=f"premium_plan_info|{p['id']}"
+        )])
+    rows.append([ibtn("🔙 Yopish", data="premium_plans_close", style="danger")])
+    return ikb(rows)
+
+
+async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium tariflar bilan bog'liq barcha callbacklar."""
+    q   = update.callback_query
+    uid = q.from_user.id
+    data = q.data or ""
+    await q.answer()
+
+    # ── Foydalanuvchiga tariflar ro'yxatini ko'rsat ──
+    if data == "premium_plans_show":
+        plans = RAM.premium_plans or []
+        if not plans:
+            await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
+            return
+        u_data = RAM.ensure_user(uid)
+        prem_until = float(u_data.get("premium_until") or 0)
+        balance    = int(u_data.get("balance") or 0)
+        if prem_until > time.time():
+            import datetime as _dt
+            left_dt = _dt.datetime.fromtimestamp(prem_until)
+            prem_info = f"\n\n✅ Sizda hozir <b>Premium</b> aktiv: <b>{left_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha"
+        else:
+            prem_info = ""
+        text = (
+            f"💎 <b>Premium tariflar</b>{prem_info}\n\n"
+            f"💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n\n"
+            f"Premiumga ega bo'lganingizdan so'ng barcha kinolar <b>bepul</b> ochiladi!\n\n"
+            f"Tarif tanlang 👇"
+        )
+        try:
+            await q.edit_message_text(text, parse_mode="HTML",
+                                      reply_markup=_premium_plans_user_kb(plans))
+        except Exception:
+            await context.bot.send_message(uid, text, parse_mode="HTML",
+                                           reply_markup=_premium_plans_user_kb(plans))
+        return
+
+    # ── Tarif haqida ma'lumot ko'rsat ──
+    if data.startswith("premium_plan_info|"):
+        plan_id = data.split("|", 1)[1]
+        plan = next((p for p in RAM.premium_plans if p["id"] == plan_id), None)
+        if not plan:
+            await q.answer("Tarif topilmadi!", show_alert=True)
+            return
+        u_data  = RAM.ensure_user(uid)
+        balance = int(u_data.get("balance") or 0)
+        enough  = balance >= plan["price"]
+        desc    = plan.get("description") or ""
+
+        text = (
+            f"💎 <b>{plan['name']}</b>\n\n"
+            f"⏳ Muddat: <b>{plan['days']} kun</b>\n"
+            f"💵 Narx: <b>{plan['price']:,} so'm</b>\n"
+        )
+        if desc:
+            text += f"📝 {desc}\n"
+        text += (
+            f"\n💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n"
+        )
+        if enough:
+            text += f"\n✅ Balansingiz yetarli!"
+        else:
+            need = plan["price"] - balance
+            text += f"\n❌ Balansingiz yetarli emas. Yana <b>{need:,} so'm</b> kerak."
+
+        rows = []
+        if enough:
+            rows.append([ibtn(f"✅ Sotib olish — {plan['price']:,} so'm",
+                              data=f"premium_plan_buy|{plan_id}", style="success")])
+        rows.append([ibtn("🔙 Orqaga", data="premium_plans_show", style="primary")])
+
+        try:
+            await q.edit_message_text(text, parse_mode="HTML", reply_markup=ikb(rows))
+        except Exception:
+            await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=ikb(rows))
+        return
+
+    # ── Tarifni sotib olish ──
+    if data.startswith("premium_plan_buy|"):
+        plan_id = data.split("|", 1)[1]
+        plan = next((p for p in RAM.premium_plans if p["id"] == plan_id), None)
+        if not plan:
+            await q.answer("Tarif topilmadi!", show_alert=True)
+            return
+        u_data  = RAM.ensure_user(uid)
+        balance = int(u_data.get("balance") or 0)
+        if balance < plan["price"]:
+            await q.answer("Balansingiz yetarli emas!", show_alert=True)
+            return
+        # Pulni ayiramiz
+        u_data["balance"] = balance - plan["price"]
+        # Premium muddatini qo'shamiz (agar avval ham premium bo'lsa — ustiga qo'shamiz)
+        now = time.time()
+        current_until = float(u_data.get("premium_until") or 0)
+        if current_until > now:
+            new_until = current_until + plan["days"] * 86400
+        else:
+            new_until = now + plan["days"] * 86400
+        u_data["premium_until"] = new_until
+        await save_now()
+
+        import datetime as _dt
+        exp_dt = _dt.datetime.fromtimestamp(new_until)
+        text = (
+            f"🎉 <b>Premium muvaffaqiyatli ulandi!</b>\n\n"
+            f"💎 Tarif: <b>{plan['name']}</b>\n"
+            f"⏳ Muddat: <b>{plan['days']} kun</b>\n"
+            f"📅 Tugash vaqti: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+            f"💰 Qolgan balans: <b>{u_data['balance']:,} so'm</b>\n\n"
+            f"✅ Endi barcha kinolar <b>bepul</b>! Tomosha qiling! 🎬"
+        )
+        try:
+            await q.edit_message_text(text, parse_mode="HTML",
+                                      reply_markup=ikb([[ibtn("🔙 Bosh menyu", data="go_home")]]))
+        except Exception:
+            await context.bot.send_message(uid, text, parse_mode="HTML")
+
+        # Adminga xabar
+        try:
+            u_name = u_data.get("name") or f"ID:{uid}"
+            u_uname = u_data.get("username") or ""
+            adm_txt = (
+                f"💎 <b>Premium sotildi!</b>\n\n"
+                f"👤 {u_name} (@{u_uname} | <code>{uid}</code>)\n"
+                f"📦 Tarif: <b>{plan['name']}</b> — {plan['days']} kun\n"
+                f"💵 To'langan: <b>{plan['price']:,} so'm</b>\n"
+                f"📅 Tugash: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>"
+            )
+            await context.bot.send_message(ADMIN_ID, adm_txt, parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    # ── Tariflar ro'yxatini yopish ──
+    if data == "premium_plans_close":
+        try: await q.delete_message()
+        except Exception: pass
+        return
+
+    # ── Admin: yangi tarif qo'shish ──
+    if data == "add_premium_plan":
+        if not is_any_admin(uid): return
+        context.user_data["admin_state"] = "add_premium_plan_name"
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await sm(context.bot, uid,
+            "💎 <b>Yangi premium tarif qo'shish</b>\n\n"
+            "1-qadam: Tarif <b>nomini</b> kiriting (masalan: 1 oylik, 1 haftalik):")
+        return
+
+    # ── Admin: tarif o'chirish ──
+    if data.startswith("del_premium_plan|"):
+        if not is_any_admin(uid): return
+        plan_id = data.split("|", 1)[1]
+        before  = len(RAM.premium_plans)
+        RAM.premium_plans = [p for p in RAM.premium_plans if p["id"] != plan_id]
+        if len(RAM.premium_plans) < before:
+            await save_now()
+            await q.answer("✅ Tarif o'chirildi!")
+        else:
+            await q.answer("❌ Tarif topilmadi!")
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await _send_premium_plans_admin(context.bot, uid)
+        return
+
+    # ── Admin panel orqaga ──
+    if data == "go_admin_panel":
+        if not is_any_admin(uid): return
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await sm(context.bot, uid, "<b>Admin panel</b>", admin_menu_kb(uid))
+        return
 
 
 def main():

@@ -7164,20 +7164,23 @@ def _premium_plans_user_kb(plans: list):
 
 async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Premium tariflar bilan bog'liq barcha callbacklar."""
-    q   = update.callback_query
-    uid = q.from_user.id
+    q    = update.callback_query
+    uid  = q.from_user.id
     data = q.data or ""
 
-    # ── Foydalanuvchiga tariflar ro'yxatini ko'rsat ──
+    # ── Tariflar ro'yxatini ko'rsat ──
     if data == "premium_plans_show":
-        await q.answer()
         plans = RAM.premium_plans or []
-        u_data = RAM.ensure_user(uid)
+        if not plans:
+            await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
+            return
+        await q.answer()
+        u_data    = RAM.ensure_user(uid)
         prem_until = float(u_data.get("premium_until") or 0)
-        balance    = int(u_data.get("balance") or 0)
+        balance   = int(u_data.get("balance") or 0)
         if prem_until > time.time():
             left_days = max(0, int((prem_until - time.time()) / 86400))
-            exp_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            exp_dt    = ts_to_tashkent(prem_until)
             prem_info = (
                 f"\n\n✅ <b>Sizda Premium aktiv!</b>\n"
                 f"📅 Tugash: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
@@ -7185,9 +7188,6 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             prem_info = ""
-        if not plans:
-            await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
-            return
         text = (
             f"💎 <b>Premium tariflar</b>{prem_info}\n\n"
             f"💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n\n"
@@ -7202,7 +7202,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                            reply_markup=_premium_plans_user_kb(plans))
         return
 
-    # ── Tarif haqida ma'lumot ko'rsat ──
+    # ── Tarif haqida ma'lumot ──
     if data.startswith("premium_plan_info|"):
         plan_id = data.split("|", 1)[1]
         plan = next((p for p in RAM.premium_plans if p["id"] == plan_id), None)
@@ -7214,7 +7214,6 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = int(u_data.get("balance") or 0)
         enough  = balance >= plan["price"]
         desc    = plan.get("description") or ""
-
         text = (
             f"💎 <b>{plan['name']}</b>\n\n"
             f"⏳ Muddat: <b>{plan['days']} kun</b>\n"
@@ -7222,28 +7221,26 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if desc:
             text += f"📝 {desc}\n"
-        text += (
-            f"\n💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n"
-        )
+        text += f"\n💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n"
         if enough:
-            text += f"\n✅ Balansingiz yetarli!"
+            text += "\n✅ Balansingiz yetarli!"
         else:
             need = plan["price"] - balance
             text += f"\n❌ Balansingiz yetarli emas. Yana <b>{need:,} so'm</b> kerak."
-
         rows = []
         if enough:
-            rows.append([ibtn(f"✅ Sotib olish — {plan['price']:,} so'm",
-                              data=f"premium_plan_buy|{plan_id}", style="success")])
+            rows.append([ibtn(
+                f"✅ Sotib olish — {plan['price']:,} so'm",
+                data=f"premium_plan_buy|{plan_id}", style="success"
+            )])
         rows.append([ibtn("🔙 Orqaga", data="premium_plans_show", style="primary")])
-
         try:
             await q.edit_message_text(text, parse_mode="HTML", reply_markup=ikb(rows))
         except Exception:
             await context.bot.send_message(uid, text, parse_mode="HTML", reply_markup=ikb(rows))
         return
 
-    # ── Tarifni sotib olish ──
+    # ── Sotib olish ──
     if data.startswith("premium_plan_buy|"):
         plan_id = data.split("|", 1)[1]
         plan = next((p for p in RAM.premium_plans if p["id"] == plan_id), None)
@@ -7253,56 +7250,46 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u_data  = RAM.ensure_user(uid)
         balance = int(u_data.get("balance") or 0)
         if balance < plan["price"]:
-            await q.answer("Balansingiz yetarli emas!", show_alert=True)
+            await q.answer("❌ Balansingiz yetarli emas!", show_alert=True)
             return
-
-        # Pulni ayiramiz
+        # Birinchi q.answer — Telegram 3 soniya kutadi
+        await q.answer()
+        # Pulni ayiramiz va premium yozamiz
         u_data["balance"] = balance - plan["price"]
         now = time.time()
         current_until = float(u_data.get("premium_until") or 0)
-        if current_until > now:
-            new_until = current_until + plan["days"] * 86400
-        else:
-            new_until = now + plan["days"] * 86400
+        new_until = (current_until if current_until > now else now) + plan["days"] * 86400
         u_data["premium_until"] = new_until
         await save_now()
-
+        # Xabar matnlari
         exp_dt = ts_to_tashkent(new_until)
-        was_premium = current_until > now
-        if was_premium:
+        if current_until > now:
             old_dt = ts_to_tashkent(current_until)
-            premium_info = (
+            prem_info = (
                 f"\n⏮ Oldingi muddat: <b>{old_dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
                 f"➕ Ustiga <b>{plan['days']} kun</b> qo'shildi"
             )
         else:
-            premium_info = f"\n⏳ Muddat: <b>{plan['days']} kun</b>"
-
+            prem_info = f"\n⏳ Muddat: <b>{plan['days']} kun</b>"
         user_txt = (
             f"🎊 <b>Tabriklaymiz!</b>\n\n"
             f"💎 Siz <b>{plan['name']}</b> Premium obunasini muvaffaqiyatli sotib oldingiz!\n"
-            f"{premium_info}\n"
+            f"{prem_info}\n"
             f"📅 Amal qilish muddati: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha\n\n"
             f"💰 Qolgan balans: <b>{u_data['balance']:,} so'm</b>\n\n"
             f"✅ Endi barcha kinolar <b>bepul</b>! Tomosha qiling! 🎬"
         )
         kb_buy = ikb([[ibtn("🎬 Kinolar", data="go_movies"), ibtn("🏠 Bosh menyu", data="go_home")]])
-
-        # Avval q.answer — keyin xabar yuboramiz
-        await q.answer("✅ Premium muvaffaqiyatli ulandi!", show_alert=False)
         try:
             await q.edit_message_text(user_txt, parse_mode="HTML", reply_markup=kb_buy)
         except Exception as e:
-            logger.warning(f"edit_message_text xato: {e}")
-            try:
-                await q.delete_message()
-            except Exception:
-                pass
+            logger.warning(f"premium edit_message xato: {e}")
+            try: await q.delete_message()
+            except Exception: pass
             await context.bot.send_message(uid, user_txt, parse_mode="HTML", reply_markup=kb_buy)
-
-        # Adminga xabar — try/except ALOHIDA, yutib yuborilmasin
-        u_name   = u_data.get("name") or f"ID:{uid}"
-        u_uname  = u_data.get("username") or ""
+        # Adminga xabar
+        u_name    = u_data.get("name") or f"ID:{uid}"
+        u_uname   = u_data.get("username") or ""
         uname_str = f"@{u_uname}" if u_uname else "username yo'q"
         adm_txt = (
             f"💎 <b>Yangi Premium sotildi!</b>\n\n"
@@ -7316,7 +7303,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(ADMIN_ID, adm_txt, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Admin xabar yuborishda xato: {e}")
+            logger.error(f"Admin xabar xato: {e}")
         return
 
     # ── Tariflar ro'yxatini yopish ──
@@ -7328,11 +7315,11 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Premium allaqachon aktiv ──
     if data == "premium_already_active":
-        u_data = RAM.ensure_user(uid)
+        u_data     = RAM.ensure_user(uid)
         prem_until = float(u_data.get("premium_until") or 0)
         if prem_until > time.time():
             left_days = max(0, int((prem_until - time.time()) / 86400))
-            exp_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            exp_dt    = ts_to_tashkent(prem_until)
             await q.answer(
                 f"✅ Sizda allaqachon Premium bor!\n"
                 f"📅 {exp_dt.strftime('%d.%m.%Y %H:%M')} gacha\n"
@@ -7374,6 +7361,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Admin panel orqaga ──
     if data == "go_admin_panel":
         if not is_any_admin(uid): return
+        await q.answer()
         try: await q.edit_message_reply_markup(reply_markup=None)
         except: pass
         await sm(context.bot, uid, "<b>Admin panel</b>", admin_menu_kb(uid))

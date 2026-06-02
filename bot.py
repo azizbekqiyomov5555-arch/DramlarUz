@@ -1708,6 +1708,14 @@ def payment_sent_kb(card: str = "", price: int = 0):
 
 def balans_kb(uid=None):
     """Foydalanuvchi balans sahifasi inline klaviaturasi."""
+    # Premium bo'lsa "Pryum olish" tugmasi chiqmasin
+    if uid:
+        u_data = RAM.ensure_user(uid)
+        prem_until = float(u_data.get("premium_until") or 0)
+        if prem_until > time.time():
+            return ikb([[
+                ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
+            ]])
     return ikb([[
         ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
         ibtn("💎 Pryum olish", data="premium_plans_show", style="primary"),

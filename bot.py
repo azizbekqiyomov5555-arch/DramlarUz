@@ -4,8 +4,19 @@ Kino Bot - v22 (PostgreSQL + TO'LOVLAR RASM PANEL)
 """
 
 import logging, asyncio, json, time, re, os, threading, copy, subprocess, tempfile
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
+
+# ─── TOSHKENT VAQTI (UTC+5) ────────────────────────────────
+TZ_TASHKENT = timezone(timedelta(hours=5))
+
+def now_tashkent() -> datetime:
+    """Hozirgi vaqtni Toshkent (UTC+5) timezone bilan qaytaradi."""
+    return datetime.now(tz=TZ_TASHKENT)
+
+def ts_to_tashkent(ts) -> datetime:
+    """Unix timestamp ni Toshkent vaqtiga o'tkazadi."""
+    return datetime.fromtimestamp(ts, tz=TZ_TASHKENT)
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -958,7 +969,7 @@ async def _do_jsonblob_save() -> bool:
     async with _ensure_lock():
         data = RAM.to_dict()
         ok = await asyncio.to_thread(_save_jsonblob, data)
-        now_str = datetime.now().strftime("%H:%M:%S")
+        now_str = now_tashkent().strftime("%H:%M:%S")
         if ok:
             DB_STATUS.update({
                 "storage_ok": True,
@@ -1170,7 +1181,7 @@ def _gsheet_append_row(row_data: list) -> bool:
 
 
 def _gsheet_log_user(user_id: int, name: str, username: str):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_tashkent().strftime("%Y-%m-%d %H:%M:%S")
     row = [str(user_id), name, f"@{username}" if username else "", now]
     threading.Thread(target=_gsheet_append_row, args=(row,), daemon=True).start()
 
@@ -1181,7 +1192,7 @@ def register_user(user):
         RAM.users[uid_str] = {
             "name": user.full_name,
             "username": user.username or "",
-            "joined": datetime.now().isoformat(),
+            "joined": now_tashkent().isoformat(),
             "paid_episodes": {},
             "watched": {},
             "balance": 0,
@@ -2489,18 +2500,12 @@ def _parse_ts(value) -> float:
 
 def _tashkent_now_str() -> str:
     """Toshkent vaqtini (UTC+5) chiroyli formatda qaytaradi."""
-    try:
-        import datetime as _dt
-        utc_now = _dt.datetime.utcnow()
-        tashkent = utc_now + _dt.timedelta(hours=5)
-        return tashkent.strftime("%d.%m.%Y  %H:%M:%S")
-    except Exception:
-        return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    return now_tashkent().strftime("%d.%m.%Y  %H:%M:%S")
 
 
 def _get_today_payments() -> list:
     """Bugungi barcha to'lovlarni vaqt bo'yicha tartiblaydi."""
-    today_start = datetime.now().replace(
+    today_start = now_tashkent().replace(
         hour=0, minute=0, second=0, microsecond=0).timestamp()
     result = []
     for pid, pay in (RAM.pending_payments or {}).items():
@@ -2717,7 +2722,7 @@ def generate_tolovlar_image(
         # Vaqt
         ts = float(pay.get("created_at") or pay.get("ts") or 0)
         if ts:
-            dt_str = datetime.fromtimestamp(ts).strftime("%d.%m.%Y  %H:%M:%S")
+            dt_str = ts_to_tashkent(ts).strftime("%d.%m.%Y  %H:%M:%S")
         else:
             dt_str = "—"
         draw.text((tx2 + 380 * SCALE, y0 + 138 * SCALE), dt_str,
@@ -2809,7 +2814,7 @@ async def _send_tolovlar_page(bot, chat_id: int, page: int = 0, query=None):
         amount = int(pay.get("amount") or 0)
 
         ts     = _parse_ts(pay.get("created_at") or pay.get("ts"))
-        dt_str = datetime.fromtimestamp(ts).strftime("%d.%m %H:%M") if ts else "—"
+        dt_str = ts_to_tashkent(ts).strftime("%d.%m %H:%M") if ts else "—"
 
         cc_s   = pay.get("cc_status", "")
         status = pay.get("status", "")
@@ -3873,7 +3878,7 @@ async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "status": "approved",
                 "price": price,
                 "payment_id": f"balance_{int(time.time())}",
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": now_tashkent().isoformat(),
                 "expire_at": expire_at,  # 7 kundan keyin qayta pullik
             }
             await schedule_save()
@@ -4003,7 +4008,7 @@ async def cb_buy_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ Balansdan yechib barcha qismlarni ochamiz (har biri 7 kunlik)
     u_data["balance"] = balance - total_price
     expire_at = time.time() + EPISODE_ACCESS_DURATION
-    now_iso = datetime.now().isoformat()
+    now_iso = now_tashkent().isoformat()
     paid_eps_updated = []
     for ek, price_int in locked_eps:
         paid_key = episode_paid_key(code, ek)
@@ -4018,7 +4023,7 @@ async def cb_buy_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await save_now()
 
-    expire_dt = datetime.fromtimestamp(expire_at).strftime("%d.%m.%Y %H:%M")
+    expire_dt = ts_to_tashkent(expire_at).strftime("%d.%m.%Y %H:%M")
     await q.answer(f"✅ {len(paid_eps_updated)} ta qism ochildi! 7 kun ochiq.", show_alert=True)
 
     # 📢 Adminga xabar
@@ -4106,7 +4111,7 @@ async def cb_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pay["status"] = "approved"
     pay["code"] = str(pay.get("code", "")).upper()
     pay["ep"] = str(pay.get("ep"))
-    pay["approved_at"] = datetime.now().isoformat()
+    pay["approved_at"] = now_tashkent().isoformat()
     uid = str(pay["user_id"])
     user_dict = RAM.ensure_user(uid)
     paid_key = episode_paid_key(pay["code"], pay["ep"])
@@ -4186,7 +4191,7 @@ async def cb_topup_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ✅ TASDIQLASH — balansga pul qo'shamiz
     pay["status"] = "approved"
-    pay["approved_at"] = datetime.now().isoformat()
+    pay["approved_at"] = now_tashkent().isoformat()
     uid_str = str(pay["user_id"])
     amount  = int(pay.get("amount", 0))
     u_data  = RAM.ensure_user(uid_str)
@@ -4385,7 +4390,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "original_amount": amount,            # Foydalanuvchi kiritgan asl miqdor
             "cc_order":       cc_order,
             "cc_status":      "pending",
-            "created_at":     datetime.now().isoformat(),
+            "created_at":     now_tashkent().isoformat(),
         }
         await schedule_save()
 
@@ -5218,7 +5223,7 @@ async def admin_state_handler(update, context, text: str) -> bool:
         if not text.strip():
             await sm(context.bot, uid, "❌ Nom bo'sh bo'lmasin.")
             return True
-        now        = datetime.now().strftime("%d.%m.%Y %H:%M")
+        now        = now_tashkent().strftime("%d.%m.%Y %H:%M")
         title_html = text_with_premium_emojis(update.message) or text
         # ❗ Darhol RAMga yoz
         RAM.movies[code] = {
@@ -5457,8 +5462,7 @@ async def admin_state_handler(update, context, text: str) -> bool:
         import time as _time
         premium_str = ""
         if premium_until > _time.time():
-            from datetime import datetime as _dt
-            prem_date = _dt.fromtimestamp(premium_until).strftime("%d.%m.%Y")
+            prem_date = ts_to_tashkent(premium_until).strftime("%d.%m.%Y")
             premium_str = f"\n👑 Premium: <b>{prem_date} gacha</b>"
         if already_blocked:
             # Blokdan chiqarish + pul qo'shish tugmalari
@@ -6379,7 +6383,7 @@ async def admin_state_handler(update, context, text: str) -> bool:
                 "status": "approved",
                 "price": 0,
                 "payment_id": f"admin_och_{uid}_{int(time.time())}",
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": now_tashkent().isoformat(),
             }
 
         def _lock_ep(ek_str):
@@ -7138,8 +7142,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prem_until = float(u_data.get("premium_until") or 0)
         balance    = int(u_data.get("balance") or 0)
         if prem_until > time.time():
-            import datetime as _dt
-            left_dt = _dt.datetime.fromtimestamp(prem_until)
+            left_dt = ts_to_tashkent(prem_until)
             prem_info = f"\n\n✅ Sizda hozir <b>Premium</b> aktiv: <b>{left_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha"
         else:
             prem_info = ""
@@ -7221,8 +7224,7 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u_data["premium_until"] = new_until
         await save_now()
 
-        import datetime as _dt
-        exp_dt = _dt.datetime.fromtimestamp(new_until)
+        exp_dt = ts_to_tashkent(new_until)
         text = (
             f"🎉 <b>Premium muvaffaqiyatli ulandi!</b>\n\n"
             f"💎 Tarif: <b>{plan['name']}</b>\n"
@@ -7338,7 +7340,7 @@ def main():
             was_down = DB_STATUS.get("ram_only", False)
             ok      = await asyncio.to_thread(_save_jsonblob, data)
             _save_local(data)
-            now_str = datetime.now().strftime("%H:%M:%S")
+            now_str = now_tashkent().strftime("%H:%M:%S")
             if ok:
                 DB_STATUS.update({
                     "storage_ok": True, "fail_count": 0,
@@ -7373,7 +7375,7 @@ def main():
     async def _startup_notify(context_job):
         try:
             ok = await asyncio.to_thread(_save_postgres, RAM.to_dict())
-            now_str = datetime.now().strftime("%H:%M:%S")
+            now_str = now_tashkent().strftime("%H:%M:%S")
             if ok:
                 DB_STATUS.update({"storage_ok": True, "last_save_ok": now_str, "ram_only": False})
                 storage_msg = f"🟢 PostgreSQL ishlayapti — {now_str}"

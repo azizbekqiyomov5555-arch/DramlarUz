@@ -1706,8 +1706,20 @@ def payment_sent_kb(card: str = "", price: int = 0):
     return ikb(rows)
 
 
-def balans_kb():
+def balans_kb(uid=None):
     """Foydalanuvchi balans sahifasi inline klaviaturasi."""
+    if uid and is_premium_user(uid):
+        try:
+            u = RAM.get_user(str(uid)) or {}
+            until = float(u.get("premium_until") or 0)
+            left_days = max(0, int((until - time.time()) / 86400))
+            prem_label = f"✅ Premium aktiv ({left_days} kun)"
+        except Exception:
+            prem_label = "✅ Premium aktiv"
+        return ikb([[
+            ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
+            ibtn(prem_label, data="premium_already_active", style="primary"),
+        ]])
     return ikb([[
         ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
         ibtn("💎 Pryum olish", data="premium_plans_show", style="primary"),
@@ -3420,7 +3432,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ══════════════════════════════════════════════
     # 💎 PREMIUM TARIFLAR callbacklari
     # ══════════════════════════════════════════════
-    if data in ("premium_plans_show", "premium_plans_close", "add_premium_plan", "go_admin_panel") \
+    if data in ("premium_plans_show", "premium_plans_close", "add_premium_plan", "go_admin_panel", "premium_already_active") \
             or data.startswith("premium_plan_info|") \
             or data.startswith("premium_plan_buy|") \
             or data.startswith("del_premium_plan|"):
@@ -4749,7 +4761,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 Joriy balans: <b>{balance:,} so'm</b>\n"
             f"📥 Jami kiritilgan: <b>{topup_tot:,} so'm</b>"
         )
-        sent_balans = await sm(context.bot, uid, txt, balans_kb())
+        sent_balans = await sm(context.bot, uid, txt, balans_kb(uid))
         if sent_balans:
             context.user_data["balans_msg_id"] = sent_balans.message_id
         return
@@ -7153,18 +7165,23 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Foydalanuvchiga tariflar ro'yxatini ko'rsat ──
     if data == "premium_plans_show":
         plans = RAM.premium_plans or []
-        if not plans:
-            await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
-            return
         u_data = RAM.ensure_user(uid)
         prem_until = float(u_data.get("premium_until") or 0)
         balance    = int(u_data.get("balance") or 0)
         if prem_until > time.time():
             import datetime as _dt
-            left_dt = _dt.ts_to_tashkent(prem_until)
-            prem_info = f"\n\n✅ Sizda hozir <b>Premium</b> aktiv: <b>{left_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha"
-        else:
-            prem_info = ""
+            left_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            left_days = max(0, int((prem_until - time.time()) / 86400))
+            await q.answer(
+                f"✅ Sizda allaqachon Premium bor!\n"
+                f"📅 {left_dt.strftime('%d.%m.%Y %H:%M')} gacha\n"
+                f"⏳ {left_days} kun qoldi",
+                show_alert=True
+            )
+            return
+        if not plans:
+            await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
+            return
         text = (
             f"💎 <b>Premium tariflar</b>{prem_info}\n\n"
             f"💰 Joriy balansingiz: <b>{balance:,} so'm</b>\n\n"
@@ -7282,6 +7299,23 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.delete_message()
         except Exception: pass
+        return
+
+    # ── Premium allaqachon aktiv ──
+    if data == "premium_already_active":
+        u_data = RAM.ensure_user(uid)
+        prem_until = float(u_data.get("premium_until") or 0)
+        if prem_until > time.time():
+            left_days = max(0, int((prem_until - time.time()) / 86400))
+            exp_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            await q.answer(
+                f"✅ Sizda allaqachon Premium bor!\n"
+                f"📅 {exp_dt.strftime('%d.%m.%Y %H:%M')} gacha\n"
+                f"⏳ {left_days} kun qoldi",
+                show_alert=True
+            )
+        else:
+            await q.answer("Premium muddati tugagan.", show_alert=True)
         return
 
     # ── Admin: yangi tarif qo'shish ──

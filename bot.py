@@ -16,7 +16,7 @@ def now_tashkent() -> datetime:
 
 def ts_to_tashkent(ts) -> datetime:
     """Unix timestamp ni Toshkent vaqtiga o'tkazadi."""
-    return datetime.fromtimestamp(ts, tz=TZ_TASHKENT)
+    return ts_to_tashkent(float(ts), tz=TZ_TASHKENT)
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -836,6 +836,18 @@ def _merge_db(blob: dict | None, local: dict | None) -> dict:
             return blob.get(key)
         return default
 
+    # premium_plans — ikkalasini birlashtir (id bo'yicha dedup)
+    blob_plans  = blob.get("premium_plans",  []) or []
+    local_plans = list(local.get("premium_plans", []) or [])
+    if local_plans:
+        seen_ids = {p["id"] for p in local_plans if isinstance(p, dict) and "id" in p}
+        for p in blob_plans:
+            if isinstance(p, dict) and p.get("id") not in seen_ids:
+                local_plans.append(p)
+        merged_plans = local_plans
+    else:
+        merged_plans = blob_plans
+
     return {
         "movies":           merged_movies,
         "users":            merged_users,
@@ -851,6 +863,7 @@ def _merge_db(blob: dict | None, local: dict | None) -> dict:
         "emoji_ids":        pick("emoji_ids", {}),
         "sub_admins":       pick("sub_admins", {}),
         "blocked_users":    pick("blocked_users", {}),
+        "premium_plans":    merged_plans,
     }
 
 
@@ -926,7 +939,8 @@ def db_initial_load():
     blob_eps  = sum(len(m.get("episodes", []) or []) for m in (blob.get("movies")  or {}).values()) if has_blob  else 0
     local_eps = sum(len(m.get("episodes", []) or []) for m in (local.get("movies") or {}).values()) if has_local else 0
     merged_eps = sum(len(m.get("episodes", []) or []) for m in RAM.movies.values())
-    logger.info(f"✅ Birlashtirildi → RAM: {len(RAM.movies)} kino, {merged_eps} qism, {len(RAM.users)} user "
+    logger.info(f"✅ Birlashtirildi → RAM: {len(RAM.movies)} kino, {merged_eps} qism, "
+                f"{len(RAM.users)} user, {len(RAM.premium_plans)} pryum tarif "
                 f"(blob: {len(blob.get('movies',{}) if has_blob else {})}/{blob_eps}, "
                 f"lokal: {len(local.get('movies',{}) if has_local else {})}/{local_eps})")
 
@@ -5462,6 +5476,7 @@ async def admin_state_handler(update, context, text: str) -> bool:
         import time as _time
         premium_str = ""
         if premium_until > _time.time():
+            from datetime import datetime as _dt
             prem_date = ts_to_tashkent(premium_until).strftime("%d.%m.%Y")
             premium_str = f"\n👑 Premium: <b>{prem_date} gacha</b>"
         if already_blocked:
@@ -7142,7 +7157,8 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prem_until = float(u_data.get("premium_until") or 0)
         balance    = int(u_data.get("balance") or 0)
         if prem_until > time.time():
-            left_dt = ts_to_tashkent(prem_until)
+            import datetime as _dt
+            left_dt = _dt.ts_to_tashkent(prem_until)
             prem_info = f"\n\n✅ Sizda hozir <b>Premium</b> aktiv: <b>{left_dt.strftime('%d.%m.%Y %H:%M')}</b> gacha"
         else:
             prem_info = ""
@@ -7224,7 +7240,8 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u_data["premium_until"] = new_until
         await save_now()
 
-        exp_dt = ts_to_tashkent(new_until)
+        import datetime as _dt
+        exp_dt = _dt.ts_to_tashkent(new_until)
         text = (
             f"🎉 <b>Premium muvaffaqiyatli ulandi!</b>\n\n"
             f"💎 Tarif: <b>{plan['name']}</b>\n"

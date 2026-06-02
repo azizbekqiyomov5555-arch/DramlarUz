@@ -1708,18 +1708,6 @@ def payment_sent_kb(card: str = "", price: int = 0):
 
 def balans_kb(uid=None):
     """Foydalanuvchi balans sahifasi inline klaviaturasi."""
-    if uid and is_premium_user(uid):
-        try:
-            u = RAM.get_user(str(uid)) or {}
-            until = float(u.get("premium_until") or 0)
-            left_days = max(0, int((until - time.time()) / 86400))
-            prem_label = f"✅ Premium aktiv ({left_days} kun)"
-        except Exception:
-            prem_label = "✅ Premium aktiv"
-        return ikb([[
-            ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
-            ibtn(prem_label, data="premium_already_active", style="primary"),
-        ]])
     return ikb([[
         ibtn(bt("hisob_toldirish"), data="topup_start", style="success", emoji_id=get_eid("hisob_toldirish")),
         ibtn("💎 Pryum olish", data="premium_plans_show", style="primary"),
@@ -4754,12 +4742,24 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance   = int(u_data.get("balance") or 0)
         topup_tot = int(u_data.get("topup_total") or 0)
         name      = user_obj.full_name or "Noma'lum"
+        prem_until = float(u_data.get("premium_until") or 0)
+        if prem_until > time.time():
+            left_days = max(0, int((prem_until - time.time()) / 86400))
+            exp_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            prem_line = (
+                f"\n\n💎 <b>Premium holati:</b> ✅ Aktiv\n"
+                f"📅 Tugash: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+                f"⏳ Qoldi: <b>{left_days} kun</b>"
+            )
+        else:
+            prem_line = "\n\n💎 <b>Premium holati:</b> ❌ Yo'q"
         txt = (
             f"💰 <b>Balansingiz</b>\n\n"
             f"👤 Ism: <b>{name}</b>\n"
             f"🆔 ID: <code>{uid}</code>\n\n"
             f"💵 Joriy balans: <b>{balance:,} so'm</b>\n"
             f"📥 Jami kiritilgan: <b>{topup_tot:,} so'm</b>"
+            f"{prem_line}"
         )
         sent_balans = await sm(context.bot, uid, txt, balans_kb(uid))
         if sent_balans:
@@ -7169,16 +7169,15 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prem_until = float(u_data.get("premium_until") or 0)
         balance    = int(u_data.get("balance") or 0)
         if prem_until > time.time():
-            import datetime as _dt
-            left_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
             left_days = max(0, int((prem_until - time.time()) / 86400))
-            await q.answer(
-                f"✅ Sizda allaqachon Premium bor!\n"
-                f"📅 {left_dt.strftime('%d.%m.%Y %H:%M')} gacha\n"
-                f"⏳ {left_days} kun qoldi",
-                show_alert=True
+            exp_dt = datetime.fromtimestamp(prem_until, tz=TZ_TASHKENT)
+            prem_info = (
+                f"\n\n✅ <b>Sizda Premium aktiv!</b>\n"
+                f"📅 Tugash: <b>{exp_dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+                f"⏳ Qoldi: <b>{left_days} kun</b>"
             )
-            return
+        else:
+            prem_info = ""
         if not plans:
             await q.answer("Hozircha premium tariflar mavjud emas!", show_alert=True)
             return

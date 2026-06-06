@@ -125,6 +125,7 @@ class RamCache:
                 "start_msg_text": "",
                 "start_msg_photo": None,
                 "admin_lichka": "",
+                "active_promos": {},
             }.items():
                 self.settings.setdefault(_k, _v)
             self.stats            = data.get("stats", {"total_views": 0})
@@ -359,6 +360,7 @@ ADMIN_PERM_KEYS = [
     "maj_kanal", "karta", "emoji_soz", "kino_kanal_set",
     "qism_tahrir", "kino_uch", "broadcast",
     "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
+    "kanal_promokod",
 ]
 
 def is_super_admin(uid) -> bool:
@@ -497,6 +499,7 @@ DEFAULT_BTN = {
     "tolovlar":           _B("💸 Foydalanuvchi to'lovlari"),
     "admin_panel":        _B("Admin panel"),
     "premium_plan_manage": _B("💎 Pryum tariflar"),
+    "kanal_promokod":      _B("🎁 Kanalga promokod"),
     "post_nomi":          "🎭",
     "post_qism":          "🎞",
     "post_kod":           "🔑",
@@ -570,6 +573,7 @@ BTN_LABELS["post_korish"]  = "Post: Ko\'rish emoji"
 BTN_LABELS["hisob_toldirish"] = "Hisobni to\'ldirish tugmasi"
 BTN_LABELS["kanal_btn"]    = "Kanal tugmasi"
 BTN_LABELS["premium_plan_manage"] = "Pryum tariflar boshqaruvi"
+BTN_LABELS["kanal_promokod"]      = "Kanalga promokod"
 LABEL_TO_KEY = {v: k for k, v in BTN_LABELS.items()}
 
 # ══════════════════════════════════════════════════════════
@@ -1378,6 +1382,7 @@ def admin_menu_kb(uid=None):
         ("qism_och",       "success"),
         ("foydalanuvchi_blok", "danger"),
         ("premium_plan_manage", "success"),
+        ("kanal_promokod",      "primary"),
     ]
     if uid is not None and not is_super_admin(uid):
         pairs = [(k, st) for (k, st) in pairs if has_perm(uid, k)]
@@ -2977,6 +2982,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_movie_menu(update, context, code)
         return
 
+    if args and args[0].startswith("bonus_"):
+        promo_code = args[0].replace("bonus_", "")
+        await _handle_bonus_claim(update, context, user.id, promo_code)
+        return
+
     ns = await check_subscription(user.id, context.bot)
     if ns:
         await sm(context.bot, user.id,
@@ -3328,6 +3338,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cb_broadcast(update, context)
         return
 
+    if data.startswith("kp_"):
+        await cb_kanal_promokod(update, context)
+        return
+
     if data == "check_sub":
         await cb_check_sub(update, context)
         return
@@ -3677,6 +3691,209 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════
 # CALLBACK: BROADCAST
 # ══════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════
+# KANALGA PROMOKOD — BONUS BERISH TIZIMI
+# ══════════════════════════════════════════════════════════
+
+async def _handle_bonus_claim(update, context, user_id, promo_code):
+    """Foydalanuvchi bonus havolasini bosganida chaqiriladi."""
+    uid = user_id
+    # Promokodni tekshiramiz
+    promo = RAM.settings.get("active_promos", {}).get(promo_code)
+    if not promo:
+        await sm(context.bot, uid,
+            "❌ <b>Bu promokod topilmadi yoki muddati o'tgan.</b>")
+        return
+    # Allaqachon olganligi tekshiriladi
+    claimed = promo.get("claimed", [])
+    if str(uid) in [str(x) for x in claimed]:
+        await sm(context.bot, uid,
+            f"ℹ️ <b>Siz bu bonusni allaqachon oldingiz!</b>\n\n"
+            f"💰 Balans tugmasini bosib qarating.")
+        return
+    # Limit tekshiruvi
+    limit = promo.get("count", "all")
+    if limit != "all" and len(claimed) >= int(limit):
+        await sm(context.bot, uid,
+            "❌ <b>Bu bonus allaqachon tugagan!</b>")
+        return
+    # Bonusni beramiz
+    bonus = int(promo.get("amount", 0))
+    u_data = RAM.ensure_user(uid)
+    u_data["balance"] = int(u_data.get("balance") or 0) + bonus
+    u_data["topup_total"] = int(u_data.get("topup_total") or 0) + bonus
+    promo.setdefault("claimed", []).append(str(uid))
+    await schedule_save()
+    await sm(context.bot, uid,
+        f"🎉 <b>Tabriklaymiz!</b>\n\n"
+        f"🎁 Sizga <b>{bonus:,} so'm</b> bonus berildi!\n\n"
+        f"💰 Joriy balans: <b>{u_data['balance']:,} so'm</b>\n\n"
+        f"Balansingizni ko'rish uchun <b>Balans</b> tugmasini bosing 👇",
+        balans_kb())
+
+
+async def cb_kanal_promokod(update, context):
+    """kp_confirm / kp_cancel callback larini boshqaradi."""
+    q   = update.callback_query
+    uid = q.from_user.id
+    data = q.data or ""
+    if not is_any_admin(uid): return
+
+    if data == "kp_cancel":
+        for k in ["kp_channel","kp_count","kp_amount","kp_promo_code",
+                  "kp_from_chat_id","kp_message_id"]:
+            context.user_data.pop(k, None)
+        context.user_data.pop("admin_state", None)
+        try: await q.edit_message_text("❌ Promokod yuborish bekor qilindi.")
+        except: pass
+        await sm(context.bot, uid, "Admin panel", admin_menu_kb(uid))
+        return
+
+    if data == "kp_confirm":
+        ch_input     = context.user_data.get("kp_channel", "")
+        kp_count     = context.user_data.get("kp_count", "all")
+        bonus_amount = context.user_data.get("kp_amount", 0)
+        promo_code   = context.user_data.get("kp_promo_code", "")
+        from_chat_id = context.user_data.get("kp_from_chat_id")
+        message_id   = context.user_data.get("kp_message_id")
+
+        if not all([ch_input, promo_code, from_chat_id, message_id]):
+            await sm(context.bot, uid, "❌ Ma'lumotlar topilmadi. Qayta boshlang.")
+            return
+
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+
+        # Promokodni RAMga saqlaymiz
+        bot_me = await context.bot.get_me()
+        bonus_url = f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
+        cnt_txt = "Barcha foydalanuvchilar" if kp_count == "all" else f"{kp_count:,} kishi"
+        promo_data = {
+            "code":    promo_code,
+            "amount":  bonus_amount,
+            "count":   kp_count,
+            "claimed": [],
+            "channel": ch_input,
+            "created_at": datetime.now().isoformat(),
+        }
+        if "active_promos" not in RAM.settings:
+            RAM.settings["active_promos"] = {}
+        RAM.settings["active_promos"][promo_code] = promo_data
+        await schedule_save()
+
+        # Kanalga xabar + Bonusni olish tugmasi bilan yuboramiz
+        bonus_btn_kb = ikb([[ibtn(
+            "🎁 Bonusni olish",
+            url=bonus_url,
+            style="success"
+        )]])
+        wait_msg = await sm(context.bot, uid, "⏳ Kanalga yuborilmoqda...")
+        try:
+            # Avval xabarni kanalga copy qilamiz
+            sent = await context.bot.copy_message(
+                chat_id=ch_input,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+                reply_markup=bonus_btn_kb
+            )
+            # Muvaffaqiyatli yuborildi — adminga hisobot
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=wait_msg.message_id)
+            except: pass
+            # Xabarni tahrirlab borish uchun message_id ni saqlaymiz
+            RAM.settings["active_promos"][promo_code]["channel_msg_id"] = sent.message_id
+            RAM.settings["active_promos"][promo_code]["channel_chat_id"] = ch_input
+            await schedule_save()
+            await sm(context.bot, uid,
+                f"✅ <b>Xabar kanalga muvaffaqiyatli yuborildi!</b>\n\n"
+                f"📢 Kanal: <code>{ch_input}</code>\n"
+                f"👥 Limit: <b>{cnt_txt}</b>\n"
+                f"💰 Bonus: <b>{bonus_amount:,} so'm</b>\n"
+                f"🔑 Promo: <code>{promo_code}</code>\n\n"
+                f"🔗 Bonus havolasi:\n<code>{bonus_url}</code>\n\n"
+                f"<i>Foydalanuvchilar tugmani bosganida bonus avtomatik beriladi.</i>",
+                ikb([
+                    [ibtn("✏️ Xabarni tahrirlash", data=f"kp_edit|{promo_code}", style="primary")],
+                    [ibtn("🔙 Admin panel", data="go_admin_panel", style="success")],
+                ]))
+        except Exception as e:
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=wait_msg.message_id)
+            except: pass
+            await sm(context.bot, uid,
+                f"❌ <b>Xabar yuborishda xato:</b>\n<code>{e}</code>\n\n"
+                f"Kanal username/ID ni tekshiring va bot kanalga admin qilinganligini ta'minlang.",
+                admin_menu_kb(uid))
+        # State tozalash
+        for k in ["kp_channel","kp_count","kp_amount","kp_promo_code",
+                  "kp_from_chat_id","kp_message_id"]:
+            context.user_data.pop(k, None)
+        context.user_data.pop("admin_state", None)
+        return
+
+    if data.startswith("kp_edit|"):
+        promo_code = data.split("|", 1)[1]
+        promo = RAM.settings.get("active_promos", {}).get(promo_code)
+        if not promo:
+            await q.answer("Promokod topilmadi!", show_alert=True)
+            return
+        context.user_data["kp_editing_promo"] = promo_code
+        context.user_data["admin_state"] = "kp_edit_msg"
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await sm(context.bot, uid,
+            f"✏️ <b>Xabarni tahrirlash</b>\n\n"
+            f"Kanalga yangi xabar yuboring (matn, rasm yoki video).\n"
+            f"<i>Xabar tagidagi <b>Bonusni olish</b> tugmasi avtomatik saqlanadi.</i>")
+        return
+
+    if state_val := context.user_data.get("admin_state"):
+        if state_val == "kp_edit_msg":
+            promo_code = context.user_data.get("kp_editing_promo")
+            # Bu qism text_handler da ishlaydi, bu yerda faqat callback uchun
+            pass
+
+
+async def _cb_kp_edit_send(update, context):
+    """kp_edit_msg holatida yangi xabar kelganda kanalga tahrirlash."""
+    uid = update.effective_user.id
+    promo_code = context.user_data.get("kp_editing_promo")
+    promo = RAM.settings.get("active_promos", {}).get(promo_code) if promo_code else None
+    if not promo:
+        await sm(context.bot, uid, "❌ Promokod topilmadi.")
+        context.user_data.pop("admin_state", None)
+        return True
+    bot_me = await context.bot.get_me()
+    bonus_url = f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
+    bonus_btn_kb = ikb([[ibtn("🎁 Bonusni olish", url=bonus_url, style="success")]])
+    ch_chat_id = promo.get("channel_chat_id") or promo.get("channel")
+    ch_msg_id  = promo.get("channel_msg_id")
+    try:
+        if ch_chat_id and ch_msg_id:
+            # Eski xabarni o'chirib yangi yuboramiz
+            try:
+                await context.bot.delete_message(chat_id=ch_chat_id, message_id=ch_msg_id)
+            except: pass
+        sent = await context.bot.copy_message(
+            chat_id=ch_chat_id,
+            from_chat_id=update.message.chat_id,
+            message_id=update.message.message_id,
+            reply_markup=bonus_btn_kb
+        )
+        RAM.settings["active_promos"][promo_code]["channel_msg_id"] = sent.message_id
+        await schedule_save()
+        await sm(context.bot, uid,
+            f"✅ <b>Xabar muvaffaqiyatli yangilandi!</b>\n\n"
+            f"Kanal: <code>{ch_chat_id}</code>",
+            admin_menu_kb(uid))
+    except Exception as e:
+        await sm(context.bot, uid,
+            f"❌ Tahrirlashda xato: <code>{e}</code>", admin_menu_kb(uid))
+    context.user_data.pop("admin_state", None)
+    context.user_data.pop("kp_editing_promo", None)
+    return True
+
 
 async def cb_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q   = update.callback_query
@@ -4631,7 +4848,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "emoji_soz", "asosiy", "boshqarish", "broadcast", "kino_uch",
             "kino_kanal_set", "qism_tahrir", "admin_qosh",
             "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
-            "tolovlar", "premium_plan_manage",
+            "tolovlar", "premium_plan_manage", "kanal_promokod",
         ]
         # Ham to'liq matn, ham emoji-siz matn bilan tekshiramiz
         all_admin_btns = {}
@@ -4668,6 +4885,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "📢 <b>Barchaga xabar yuborish</b>\n\n"
                     "Xabar yuboring — matn, rasm yoki video.")
                 context.user_data["admin_state"] = "broadcast_msg"
+                return
+            if key == "kanal_promokod":
+                clear_admin_state(context)
+                context.user_data["admin_state"] = "kp_channel"
+                await sm(context.bot, uid,
+                    "🎁 <b>Kanalga promokod yuborish</b>\n\n"
+                    "1-qadam: Kanal username yoki ID sini kiriting:\n"
+                    "<i>Masalan: @mening_kanalim yoki -1001234567890</i>")
                 return
             if key == "kino_uch":
                 context.user_data.pop("emoji_menu", None)
@@ -5057,6 +5282,83 @@ async def admin_state_handler(update, context, text: str) -> bool:
         await sm(context.bot, uid, "✅ Xabar qabul qilindi.\n\n<b>Tugmali xabar yuborasizmi?</b>",
                  markup=bc_yesno_kb())
         return True
+
+    # ── KANALGA PROMOKOD ─────────────────────────────────────
+    if state == "kp_channel":
+        ch_input = text.strip()
+        context.user_data["kp_channel"] = ch_input
+        context.user_data["admin_state"] = "kp_count"
+        await sm(context.bot, uid,
+            f"✅ Kanal: <code>{ch_input}</code>\n\n"
+            f"2-qadam: Nechta kishiga bonus yuborilsin?\n"
+            f"<i>Raqam kiriting (masalan: 100) yoki <b>hammasi</b> deb yozing</i>")
+        return True
+
+    if state == "kp_count":
+        val = text.strip().lower()
+        if val == "hammasi":
+            context.user_data["kp_count"] = "all"
+        elif val.isdigit() and int(val) > 0:
+            context.user_data["kp_count"] = int(val)
+        else:
+            await sm(context.bot, uid,
+                "❌ Noto'g'ri. Raqam yoki <b>hammasi</b> deb yozing:")
+            return True
+        context.user_data["admin_state"] = "kp_amount"
+        cnt = context.user_data["kp_count"]
+        cnt_txt = "Barcha foydalanuvchilar" if cnt == "all" else f"{cnt:,} kishi"
+        await sm(context.bot, uid,
+            f"✅ Qabul qiluvchilar: <b>{cnt_txt}</b>\n\n"
+            f"3-qadam: Har bir kishiga qancha bonus berilsin? (so'mda)\n"
+            f"<i>Masalan: 5000</i>")
+        return True
+
+    if state == "kp_amount":
+        val = text.strip()
+        if not val.isdigit() or int(val) <= 0:
+            await sm(context.bot, uid,
+                "❌ Faqat musbat raqam kiriting (masalan: 5000):")
+            return True
+        bonus_amount = int(val)
+        context.user_data["kp_amount"] = bonus_amount
+        context.user_data["admin_state"] = "kp_msg"
+        await sm(context.bot, uid,
+            f"✅ Bonus miqdori: <b>{bonus_amount:,} so'm</b>\n\n"
+            f"4-qadam: Kanalga yuboriladigan xabarni yozing:\n"
+            f"<i>(matn, rasm yoki video yuborishingiz mumkin — "
+            f"xabar tagida <b>Bonusni olish</b> tugmasi avtomatik qo'shiladi)</i>")
+        return True
+
+    if state == "kp_msg":
+        bot_me = await context.bot.get_me()
+        bonus_amount = context.user_data.get("kp_amount", 0)
+        ch_input = context.user_data.get("kp_channel", "")
+        kp_count = context.user_data.get("kp_count", "all")
+        # Promokod kodi yaratamiz
+        import random, string
+        promo_code = "BONUS" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        context.user_data["kp_promo_code"] = promo_code
+        context.user_data["kp_from_chat_id"] = update.message.chat_id
+        context.user_data["kp_message_id"] = update.message.message_id
+        cnt_txt = "Barcha foydalanuvchilar" if kp_count == "all" else f"{kp_count:,} kishi"
+        await sm(context.bot, uid,
+            f"✅ <b>Xabar qabul qilindi!</b>\n\n"
+            f"📋 <b>Tasdiq:</b>\n"
+            f"📢 Kanal: <code>{ch_input}</code>\n"
+            f"👥 Qabul qiluvchilar: <b>{cnt_txt}</b>\n"
+            f"💰 Bonus: <b>{bonus_amount:,} so'm</b>\n"
+            f"🔑 Promo kod: <code>{promo_code}</code>\n\n"
+            f"Xabar tagida <b>🎁 Bonusni olish</b> tugmasi bo'ladi.\n\n"
+            f"Yuborishni tasdiqlaysizmi?",
+            ikb([
+                [ibtn("✅ Yuborish", data="kp_confirm", style="success"),
+                 ibtn("❌ Bekor", data="kp_cancel", style="danger")]
+            ]))
+        context.user_data["admin_state"] = "kp_confirm_wait"
+        return True
+
+    if state == "kp_edit_msg":
+        return await _cb_kp_edit_send(update, context)
 
     if state == "delete_movie_code":
         code = text.upper().strip()

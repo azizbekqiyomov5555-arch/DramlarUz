@@ -1349,7 +1349,7 @@ def main_menu_kb(is_admin=False):
     rows = [[
         rbtn(bt("yordam"),  style="danger", emoji_id=get_eid("yordam")),
         rbtn(bt("install"), style="success", emoji_id=get_eid("install"),
-             web_app_url="https://azizbekqiyomov5555-arch.github.io/Kkk/"),
+             web_app_url="https://www.youtube.com/@DramlarUz"),
     ], [
         rbtn(bt("barcha_kino"), style="primary", emoji_id=get_eid("barcha_kino")),
         rbtn(bt("balans"),      style="success", emoji_id=get_eid("balans")),

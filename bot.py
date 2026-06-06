@@ -3697,7 +3697,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════
 
 async def _update_promo_channel_msg(bot, promo_code: str):
-    """Kanal xabarini bonus statistikasi bilan yangilaydi."""
+    """Kanal xabarini bonus statistikasi bilan yangilaydi.
+    Original formatlash (premium emoji, iqtibos va h.k.) saqlanadi."""
     try:
         promo = RAM.settings.get("active_promos", {}).get(promo_code)
         if not promo: return
@@ -3707,47 +3708,64 @@ async def _update_promo_channel_msg(bot, promo_code: str):
 
         claimed_count = len(promo.get("claimed", []))
         limit = promo.get("count", "all")
-        bonus_amount  = int(promo.get("amount", 0))
 
         if limit == "all":
-            stat_line = (
-                f"\n\n👥 <b>{claimed_count}</b> kishi bonus oldi"
-            )
+            stat_line = f"\n\n👥 {claimed_count} kishi bonus oldi"
         else:
             limit_int = int(limit)
             left = max(0, limit_int - claimed_count)
-            stat_line = (
-                f"\n\n👥 <b>{claimed_count}/{limit_int}</b> kishi bonus oldi  |  "
-                f"🎁 <b>{left}</b> ta qoldi"
-            )
+            stat_line = f"\n\n👥 {claimed_count}/{limit_int} kishi bonus oldi  |  🎁 {left} ta qoldi"
 
-        original_text = promo.get("channel_original_text", "")
-        original_caption = promo.get("channel_original_caption", "")
         bonus_url = promo.get("bonus_url", "")
         bonus_btn_kb = ikb([[ibtn("🎁 Bonusni olish", url=bonus_url, style="success")]]) if bonus_url else None
 
-        # Rasm/video xabari (caption) yoki oddiy matn
-        if original_caption:
-            new_caption = original_caption + stat_line
+        has_caption  = promo.get("channel_has_caption", False)
+        orig_entities = promo.get("channel_original_entities", [])
+
+        # entities dan MessageEntity obyektlarini qayta yasaymiz
+        from telegram import MessageEntity
+        def build_entities(entities_data, text_offset=0):
+            result = []
+            for e in (entities_data or []):
+                try:
+                    result.append(MessageEntity(
+                        type=e["type"],
+                        offset=e["offset"] + text_offset,
+                        length=e["length"],
+                        url=e.get("url"),
+                        user=None,
+                        language=e.get("language"),
+                        custom_emoji_id=e.get("custom_emoji_id"),
+                    ))
+                except Exception:
+                    pass
+            return result
+
+        if has_caption:
+            orig_caption = promo.get("channel_original_caption", "")
+            new_caption  = orig_caption + stat_line
+            entities     = build_entities(orig_entities)
             try:
                 await bot.edit_message_caption(
                     chat_id=ch_chat_id,
                     message_id=ch_msg_id,
                     caption=new_caption,
-                    parse_mode="HTML",
+                    caption_entities=entities if entities else None,
                     reply_markup=bonus_btn_kb
                 )
             except Exception as e:
                 if "not modified" not in str(e).lower():
                     logger.warning(f"Promo caption edit xato: {e}")
-        elif original_text:
-            new_text = original_text + stat_line
+        else:
+            orig_text = promo.get("channel_original_text", "")
+            new_text  = orig_text + stat_line
+            entities  = build_entities(orig_entities)
             try:
                 await bot.edit_message_text(
                     chat_id=ch_chat_id,
                     message_id=ch_msg_id,
                     text=new_text,
-                    parse_mode="HTML",
+                    entities=entities if entities else None,
                     reply_markup=bonus_btn_kb
                 )
             except Exception as e:
@@ -3810,7 +3828,9 @@ async def cb_kanal_promokod(update, context):
 
     if data == "kp_cancel":
         for k in ["kp_channel","kp_count","kp_amount","kp_promo_code",
-                  "kp_from_chat_id","kp_message_id"]:
+                  "kp_from_chat_id","kp_message_id",
+                  "kp_original_text","kp_original_caption",
+                  "kp_has_caption","kp_original_entities"]:
             context.user_data.pop(k, None)
         context.user_data.pop("admin_state", None)
         try: await q.edit_message_text("❌ Promokod yuborish bekor qilindi.")
@@ -3838,18 +3858,11 @@ async def cb_kanal_promokod(update, context):
         bonus_url = f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
         cnt_txt = "Barcha foydalanuvchilar" if kp_count == "all" else f"{kp_count:,} kishi"
 
-        # Asl xabar matnini olish (statistika qo'shish uchun keyinroq kerak)
-        try:
-            orig_msg = await context.bot.forward_message(
-                chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
-            original_text    = orig_msg.text or ""
-            original_caption = orig_msg.caption or ""
-            try:
-                await context.bot.delete_message(chat_id=uid, message_id=orig_msg.message_id)
-            except: pass
-        except Exception:
-            original_text    = ""
-            original_caption = ""
+        # Asl xabar matni user_data dan (forward shart emas)
+        original_text    = context.user_data.get("kp_original_text", "")
+        original_caption = context.user_data.get("kp_original_caption", "")
+        has_caption      = context.user_data.get("kp_has_caption", False)
+        original_entities = context.user_data.get("kp_original_entities", [])
 
         promo_data = {
             "code":    promo_code,
@@ -3860,6 +3873,8 @@ async def cb_kanal_promokod(update, context):
             "bonus_url": bonus_url,
             "channel_original_text":    original_text,
             "channel_original_caption": original_caption,
+            "channel_has_caption":      has_caption,
+            "channel_original_entities": original_entities,
             "created_at": datetime.now().isoformat(),
         }
         if "active_promos" not in RAM.settings:
@@ -3914,7 +3929,9 @@ async def cb_kanal_promokod(update, context):
                 admin_menu_kb(uid))
         # State tozalash
         for k in ["kp_channel","kp_count","kp_amount","kp_promo_code",
-                  "kp_from_chat_id","kp_message_id"]:
+                  "kp_from_chat_id","kp_message_id",
+                  "kp_original_text","kp_original_caption",
+                  "kp_has_caption","kp_original_entities"]:
             context.user_data.pop(k, None)
         context.user_data.pop("admin_state", None)
         return
@@ -3957,19 +3974,22 @@ async def _cb_kp_edit_send(update, context):
     ch_chat_id = promo.get("channel_chat_id") or promo.get("channel")
     ch_msg_id  = promo.get("channel_msg_id")
 
-    # Yangi xabarning asl matnini olamiz
-    try:
-        fwd = await context.bot.forward_message(
-            chat_id=uid, from_chat_id=update.message.chat_id,
-            message_id=update.message.message_id)
-        new_original_text    = fwd.text or ""
-        new_original_caption = fwd.caption or ""
-        try:
-            await context.bot.delete_message(chat_id=uid, message_id=fwd.message_id)
-        except: pass
-    except Exception:
-        new_original_text    = ""
-        new_original_caption = ""
+    # Yangi xabarning asl matnini to'g'ridan-to'g'ri olamiz
+    new_original_text    = update.message.text or ""
+    new_original_caption = update.message.caption or ""
+    new_has_caption      = bool(update.message.caption)
+    raw_ents = update.message.caption_entities or update.message.entities or []
+    new_entities = [
+        {
+            "type": e.type,
+            "offset": e.offset,
+            "length": e.length,
+            "url": e.url,
+            "language": e.language if hasattr(e, "language") else None,
+            "custom_emoji_id": e.custom_emoji_id if hasattr(e, "custom_emoji_id") else None,
+        }
+        for e in raw_ents
+    ]
 
     try:
         if ch_chat_id and ch_msg_id:
@@ -3986,6 +4006,8 @@ async def _cb_kp_edit_send(update, context):
         RAM.settings["active_promos"][promo_code]["channel_msg_id"] = sent.message_id
         RAM.settings["active_promos"][promo_code]["channel_original_text"]    = new_original_text
         RAM.settings["active_promos"][promo_code]["channel_original_caption"] = new_original_caption
+        RAM.settings["active_promos"][promo_code]["channel_has_caption"]      = new_has_caption
+        RAM.settings["active_promos"][promo_code]["channel_original_entities"] = new_entities
         await schedule_save()
         # Statistikani darhol yangilaymiz
         await _update_promo_channel_msg(context.bot, promo_code)
@@ -5436,16 +5458,31 @@ async def admin_state_handler(update, context, text: str) -> bool:
         return True
 
     if state == "kp_msg":
-        bot_me = await context.bot.get_me()
         bonus_amount = context.user_data.get("kp_amount", 0)
         ch_input = context.user_data.get("kp_channel", "")
         kp_count = context.user_data.get("kp_count", "all")
-        # Promokod kodi yaratamiz
         import random, string
         promo_code = "BONUS" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
         context.user_data["kp_promo_code"] = promo_code
         context.user_data["kp_from_chat_id"] = update.message.chat_id
         context.user_data["kp_message_id"] = update.message.message_id
+        # Asl matnni va entities ni to'g'ridan-to'g'ri saqlaymiz
+        context.user_data["kp_original_text"]    = update.message.text or ""
+        context.user_data["kp_original_caption"] = update.message.caption or ""
+        context.user_data["kp_has_caption"] = bool(update.message.caption)
+        # entities ni JSON ga o'girib saqlaymiz
+        raw_ents = update.message.caption_entities or update.message.entities or []
+        context.user_data["kp_original_entities"] = [
+            {
+                "type": e.type,
+                "offset": e.offset,
+                "length": e.length,
+                "url": e.url,
+                "language": e.language if hasattr(e, "language") else None,
+                "custom_emoji_id": e.custom_emoji_id if hasattr(e, "custom_emoji_id") else None,
+            }
+            for e in raw_ents
+        ]
         cnt_txt = "Barcha foydalanuvchilar" if kp_count == "all" else f"{kp_count:,} kishi"
         await sm(context.bot, uid,
             f"✅ <b>Xabar qabul qilindi!</b>\n\n"

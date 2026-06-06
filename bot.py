@@ -3696,6 +3696,67 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # KANALGA PROMOKOD — BONUS BERISH TIZIMI
 # ══════════════════════════════════════════════════════════
 
+async def _update_promo_channel_msg(bot, promo_code: str):
+    """Kanal xabarini bonus statistikasi bilan yangilaydi."""
+    try:
+        promo = RAM.settings.get("active_promos", {}).get(promo_code)
+        if not promo: return
+        ch_chat_id = promo.get("channel_chat_id") or promo.get("channel")
+        ch_msg_id  = promo.get("channel_msg_id")
+        if not ch_chat_id or not ch_msg_id: return
+
+        claimed_count = len(promo.get("claimed", []))
+        limit = promo.get("count", "all")
+        bonus_amount  = int(promo.get("amount", 0))
+
+        if limit == "all":
+            stat_line = (
+                f"\n\n👥 <b>{claimed_count}</b> kishi bonus oldi"
+            )
+        else:
+            limit_int = int(limit)
+            left = max(0, limit_int - claimed_count)
+            stat_line = (
+                f"\n\n👥 <b>{claimed_count}/{limit_int}</b> kishi bonus oldi  |  "
+                f"🎁 <b>{left}</b> ta qoldi"
+            )
+
+        original_text = promo.get("channel_original_text", "")
+        original_caption = promo.get("channel_original_caption", "")
+        bonus_url = promo.get("bonus_url", "")
+        bonus_btn_kb = ikb([[ibtn("🎁 Bonusni olish", url=bonus_url, style="success")]]) if bonus_url else None
+
+        # Rasm/video xabari (caption) yoki oddiy matn
+        if original_caption:
+            new_caption = original_caption + stat_line
+            try:
+                await bot.edit_message_caption(
+                    chat_id=ch_chat_id,
+                    message_id=ch_msg_id,
+                    caption=new_caption,
+                    parse_mode="HTML",
+                    reply_markup=bonus_btn_kb
+                )
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    logger.warning(f"Promo caption edit xato: {e}")
+        elif original_text:
+            new_text = original_text + stat_line
+            try:
+                await bot.edit_message_text(
+                    chat_id=ch_chat_id,
+                    message_id=ch_msg_id,
+                    text=new_text,
+                    parse_mode="HTML",
+                    reply_markup=bonus_btn_kb
+                )
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    logger.warning(f"Promo text edit xato: {e}")
+    except Exception as e:
+        logger.warning(f"_update_promo_channel_msg xato: {e}")
+
+
 async def _handle_bonus_claim(update, context, user_id, promo_code):
     """Foydalanuvchi bonus havolasini bosganida chaqiriladi."""
     uid = user_id
@@ -3708,9 +3769,14 @@ async def _handle_bonus_claim(update, context, user_id, promo_code):
     # Allaqachon olganligi tekshiriladi
     claimed = promo.get("claimed", [])
     if str(uid) in [str(x) for x in claimed]:
+        bonus = int(promo.get("amount", 0))
+        u_data = RAM.ensure_user(uid)
+        cur_balance = int(u_data.get("balance") or 0)
         await sm(context.bot, uid,
             f"ℹ️ <b>Siz bu bonusni allaqachon oldingiz!</b>\n\n"
-            f"💰 Balans tugmasini bosib qarating.")
+            f"🎁 Berilgan bonus: <b>{bonus:,} so'm</b>\n"
+            f"💰 Balansingiz: <b>{cur_balance:,} so'm</b>",
+            balans_kb())
         return
     # Limit tekshiruvi
     limit = promo.get("count", "all")
@@ -3725,11 +3791,13 @@ async def _handle_bonus_claim(update, context, user_id, promo_code):
     u_data["topup_total"] = int(u_data.get("topup_total") or 0) + bonus
     promo.setdefault("claimed", []).append(str(uid))
     await schedule_save()
+    # Kanal xabarini yangilaymiz — statistika o'zgaradi
+    asyncio.create_task(_update_promo_channel_msg(context.bot, promo_code))
     await sm(context.bot, uid,
         f"🎉 <b>Tabriklaymiz!</b>\n\n"
-        f"🎁 Sizga <b>{bonus:,} so'm</b> bonus berildi!\n\n"
-        f"💰 Joriy balans: <b>{u_data['balance']:,} so'm</b>\n\n"
-        f"Balansingizni ko'rish uchun <b>Balans</b> tugmasini bosing 👇",
+        f"🎁 Sizga <b>{bonus:,} so'm</b> bonus berildi!\n"
+        f"💰 Joriy balansingiz: <b>{u_data['balance']:,} so'm</b>\n\n"
+        f"👇 <b>Balans</b> tugmasini bosib bonusingizni ko'ring!",
         balans_kb())
 
 
@@ -3769,12 +3837,29 @@ async def cb_kanal_promokod(update, context):
         bot_me = await context.bot.get_me()
         bonus_url = f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
         cnt_txt = "Barcha foydalanuvchilar" if kp_count == "all" else f"{kp_count:,} kishi"
+
+        # Asl xabar matnini olish (statistika qo'shish uchun keyinroq kerak)
+        try:
+            orig_msg = await context.bot.forward_message(
+                chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
+            original_text    = orig_msg.text or ""
+            original_caption = orig_msg.caption or ""
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=orig_msg.message_id)
+            except: pass
+        except Exception:
+            original_text    = ""
+            original_caption = ""
+
         promo_data = {
             "code":    promo_code,
             "amount":  bonus_amount,
             "count":   kp_count,
             "claimed": [],
             "channel": ch_input,
+            "bonus_url": bonus_url,
+            "channel_original_text":    original_text,
+            "channel_original_caption": original_caption,
             "created_at": datetime.now().isoformat(),
         }
         if "active_promos" not in RAM.settings:
@@ -3805,6 +3890,8 @@ async def cb_kanal_promokod(update, context):
             RAM.settings["active_promos"][promo_code]["channel_msg_id"] = sent.message_id
             RAM.settings["active_promos"][promo_code]["channel_chat_id"] = ch_input
             await schedule_save()
+            # Dastlabki statistikani kanalga qo'shamiz (0 oldi)
+            await _update_promo_channel_msg(context.bot, promo_code)
             await sm(context.bot, uid,
                 f"✅ <b>Xabar kanalga muvaffaqiyatli yuborildi!</b>\n\n"
                 f"📢 Kanal: <code>{ch_input}</code>\n"
@@ -3865,10 +3952,25 @@ async def _cb_kp_edit_send(update, context):
         context.user_data.pop("admin_state", None)
         return True
     bot_me = await context.bot.get_me()
-    bonus_url = f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
+    bonus_url = promo.get("bonus_url") or f"https://t.me/{bot_me.username}?start=bonus_{promo_code}"
     bonus_btn_kb = ikb([[ibtn("🎁 Bonusni olish", url=bonus_url, style="success")]])
     ch_chat_id = promo.get("channel_chat_id") or promo.get("channel")
     ch_msg_id  = promo.get("channel_msg_id")
+
+    # Yangi xabarning asl matnini olamiz
+    try:
+        fwd = await context.bot.forward_message(
+            chat_id=uid, from_chat_id=update.message.chat_id,
+            message_id=update.message.message_id)
+        new_original_text    = fwd.text or ""
+        new_original_caption = fwd.caption or ""
+        try:
+            await context.bot.delete_message(chat_id=uid, message_id=fwd.message_id)
+        except: pass
+    except Exception:
+        new_original_text    = ""
+        new_original_caption = ""
+
     try:
         if ch_chat_id and ch_msg_id:
             # Eski xabarni o'chirib yangi yuboramiz
@@ -3882,7 +3984,11 @@ async def _cb_kp_edit_send(update, context):
             reply_markup=bonus_btn_kb
         )
         RAM.settings["active_promos"][promo_code]["channel_msg_id"] = sent.message_id
+        RAM.settings["active_promos"][promo_code]["channel_original_text"]    = new_original_text
+        RAM.settings["active_promos"][promo_code]["channel_original_caption"] = new_original_caption
         await schedule_save()
+        # Statistikani darhol yangilaymiz
+        await _update_promo_channel_msg(context.bot, promo_code)
         await sm(context.bot, uid,
             f"✅ <b>Xabar muvaffaqiyatli yangilandi!</b>\n\n"
             f"Kanal: <code>{ch_chat_id}</code>",

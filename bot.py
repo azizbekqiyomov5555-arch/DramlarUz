@@ -397,6 +397,138 @@ def _is_duplicate_update(update) -> bool:
             _SEEN_UPDATE_IDS.discard(x)
     return False
 
+
+# ══════════════════════════════════════════════════════════
+# 🛡 ANTI-SPAM TIZIMI — Telegram shikoyatidan himoya
+# ══════════════════════════════════════════════════════════
+#
+# Telegram botni nima uchun o'chiradi:
+#   1. Ko'p foydalanuvchi "Block and report spam" bosadi
+#   2. Bot bir foydalanuvchiga juda ko'p xabar yuboradi (flood)
+#   3. Bir foydalanuvchi botga juda tez-tez xabar yuboradi
+#
+# Bu tizim uchala muammoni hal qiladi.
+
+# Har bir foydalanuvchi uchun: {uid: [timestamp, timestamp, ...]}
+_SPAM_TRACKER: dict[int, list] = {}
+# Ogohlantirish soni: {uid: count}
+_SPAM_WARN_COUNT: dict[int, int] = {}
+# So'nggi ogohlantirish vaqti: {uid: timestamp}
+_SPAM_LAST_WARN: dict[int, float] = {}
+# Bot tomonidan yuborilgan xabarlar soni (flood oldini olish): {uid: [ts,...]}
+_BOT_MSG_TRACKER: dict[int, list] = {}
+
+# ── Sozlamalar ──────────────────────────────────────────
+SPAM_WINDOW       = 10    # soniya ichida
+SPAM_MAX_MSGS     = 8     # 10 soniyada 8 xabardan ko'p = spam
+SPAM_WARN_LIMIT   = 3     # 3 marta ogohlantirish = avtoblok
+SPAM_MUTE_TIME    = 60    # ogohlantirishdan keyin 60 soniya jim turadi
+BOT_FLOOD_WINDOW  = 5     # 5 soniyada botdan nechta xabar
+BOT_FLOOD_MAX     = 3     # botdan 5 soniyada 3 tadan ko'p xabar = kamaytir
+
+_spam_lock = threading.Lock()
+
+
+def _anti_spam_check(uid: int) -> tuple[bool, str]:
+    """
+    True, "reason" — spam aniqlandi, xabarni qaytarish kerak
+    False, ""       — normal, xabarni qayta ishlash mumkin
+    """
+    now = time.time()
+    with _spam_lock:
+        # Tracker tozalash (eski vaqtlarni o'chirish)
+        times = _SPAM_TRACKER.get(uid, [])
+        times = [t for t in times if now - t < SPAM_WINDOW]
+        times.append(now)
+        _SPAM_TRACKER[uid] = times
+
+        # Mute tekshiruvi — hozir jim turish vaqtidami?
+        last_warn = _SPAM_LAST_WARN.get(uid, 0)
+        if now - last_warn < SPAM_MUTE_TIME:
+            return True, "muted"
+
+        # Spam chegara
+        if len(times) > SPAM_MAX_MSGS:
+            warn_count = _SPAM_WARN_COUNT.get(uid, 0) + 1
+            _SPAM_WARN_COUNT[uid] = warn_count
+            _SPAM_LAST_WARN[uid]  = now
+            _SPAM_TRACKER[uid]    = []  # counter reset
+
+            if warn_count >= SPAM_WARN_LIMIT:
+                return True, "autoblock"
+            return True, f"warn:{warn_count}"
+
+    return False, ""
+
+
+def _bot_flood_ok(uid: int) -> bool:
+    """Bot bu foydalanuvchiga juda ko'p xabar yuborayotgan bo'lsa — False qaytaradi."""
+    now = time.time()
+    with _spam_lock:
+        times = _BOT_MSG_TRACKER.get(uid, [])
+        times = [t for t in times if now - t < BOT_FLOOD_WINDOW]
+        times.append(now)
+        _BOT_MSG_TRACKER[uid] = times
+        return len(times) <= BOT_FLOOD_MAX
+
+
+async def _apply_spam_action(bot, uid: int, reason: str) -> bool:
+    """
+    Spam harakat bajaradi. True qaytarsa — xabarni to'xtatish kerak.
+    """
+    if reason == "muted":
+        # Jim — hech narsa yubormaymiz (xabarni shunchaki o'tkazib yuboramiz)
+        return True
+
+    if reason == "autoblock":
+        # Avtomatik bloklash
+        uid_str = str(uid)
+        if uid_str not in RAM.blocked_users:
+            RAM.blocked_users[uid_str] = {
+                "blocked_at": time.time(),
+                "by": ADMIN_ID,
+                "reason": "anti_spam_autoblock",
+            }
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(schedule_save())
+            except RuntimeError:
+                pass
+            logger.warning(f"🛡 Anti-spam: {uid} avtoblok qilindi (spam)")
+            # Adminga xabar
+            try:
+                u_data = RAM.users.get(uid_str, {})
+                name   = u_data.get("name") or f"ID:{uid}"
+                uname  = u_data.get("username") or ""
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"🛡 <b>Anti-spam avtoblok!</b>\n\n"
+                    f"👤 {name} (@{uname} | <code>{uid}</code>)\n"
+                    f"⚡ Sabab: juda ko'p xabar yubordi",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return True
+
+    if reason.startswith("warn:"):
+        warn_n = reason.split(":")[1]
+        qolgan = SPAM_WARN_LIMIT - int(warn_n)
+        # Ogohlantirish — faqat bitta xabar
+        try:
+            await bot.send_message(
+                uid,
+                f"⚠️ Juda tez xabar yuboryapsiz!\n"
+                f"Iltimos, biroz kuting.\n"
+                f"({qolgan} marta yana takrorlasangiz — <b>bloklansiz</b>)",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        return True
+
+    return False
+
 # ══════════════════════════════════════════════════════════
 # STORAGE STATUS
 # ══════════════════════════════════════════════════════════
@@ -1177,6 +1309,23 @@ def _gsheet_log_user(user_id: int, name: str, username: str):
 
 def register_user(user):
     uid_str = str(user.id)
+
+    # ── SUNIY ODAM (BOT) ANIQLASH VA AVTOMATIK BLOKLASH ──────
+    if getattr(user, "is_bot", False):
+        if uid_str not in RAM.blocked_users:
+            RAM.blocked_users[uid_str] = {
+                "blocked_at": time.time(),
+                "by": ADMIN_ID,
+                "reason": "auto_bot_detected",
+            }
+            logger.warning(f"🤖 Bot aniqlandi va avtomat bloklandi: {user.id} (@{user.username})")
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(schedule_save())
+            except RuntimeError:
+                save_sync()
+        return  # Botni ro'yxatdan o'tkazmaymiz
+
     if uid_str not in RAM.users:
         RAM.users[uid_str] = {
             "name": user.full_name,
@@ -1789,6 +1938,9 @@ def bc_more_yesno_kb():
 # ══════════════════════════════════════════════════════════
 
 async def sm(bot, chat_id, text, markup=None, pm="HTML", reply_to_message_id=None):
+    # Bot flood himoyasi — bir foydalanuvchiga juda tez xabar yubormasin
+    if isinstance(chat_id, int) and not _bot_flood_ok(chat_id):
+        await asyncio.sleep(0.3)
     kw = {"chat_id": chat_id, "text": text, "parse_mode": pm}
     if markup: kw["reply_markup"] = markup
     if reply_to_message_id: kw["reply_to_message_id"] = reply_to_message_id
@@ -2952,6 +3104,13 @@ async def _send_kino_list_page(bot, chat_id: int, page: int = 0, query=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_duplicate_update(update): return
     user = update.effective_user
+
+    # ── SUNIY ODAM (BOT) TEKSHIRUVI — darhol bloklash ────
+    if getattr(user, "is_bot", False):
+        register_user(user)  # auto-block ichida
+        logger.warning(f"🤖 Bot /start yubordi — rad etildi: {user.id}")
+        return
+
     register_user(user)
     clear_admin_state(context)
     args = context.args
@@ -3051,6 +3210,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     uid  = q.from_user.id
     await q.answer()
+
+    # ── ANTI-SPAM (callback tugmalarni tez bosishga qarshi) ──
+    if not is_any_admin(uid):
+        is_spam, reason = _anti_spam_check(uid)
+        if is_spam:
+            await _apply_spam_action(context.bot, uid, reason)
+            return
 
     # ── Bloklangan foydalanuvchi — hech narsa qilmaymiz ──
     if is_blocked_user(uid) and not is_any_admin(uid):
@@ -4258,9 +4424,22 @@ def _get_admin_reserved_texts() -> set:
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_duplicate_update(update): return
     user = update.effective_user
+
+    # ── SUNIY ODAM (BOT) TEKSHIRUVI ──
+    if getattr(user, "is_bot", False):
+        register_user(user)  # auto-block
+        return
+
     uid  = user.id
     msg  = update.message
     text = (msg.text or "").strip()
+
+    # ── ANTI-SPAM TEKSHIRUVI ──────────────────────────────
+    if not is_any_admin(uid):
+        is_spam, reason = _anti_spam_check(uid)
+        if is_spam:
+            await _apply_spam_action(context.bot, uid, reason)
+            return
 
     # ── Bloklangan foydalanuvchi — hech narsa qilmaymiz ──
     if is_blocked_user(uid) and not is_any_admin(uid):
@@ -6484,6 +6663,13 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg   = update.message
     state = context.user_data.get("admin_state")
 
+    # ── ANTI-SPAM (faqat oddiy foydalanuvchilar uchun) ──
+    if not is_any_admin(uid):
+        is_spam, reason = _anti_spam_check(uid)
+        if is_spam:
+            await _apply_spam_action(context.bot, uid, reason)
+            return
+
     if is_any_admin(uid) and state == "broadcast_msg":
         bc = {
             "type": "copy",
@@ -7398,10 +7584,34 @@ def main():
         app.job_queue.run_repeating(_periodic_sync, interval=120, first=60)
         logger.info("🔄 Periodik sync yoqildi (har 2 daqiqada)")
 
+    # ── XATO HANDLER — bot o'chmasin ──────────────────────
+    async def error_handler(update, context):
+        import traceback
+        from telegram.error import (NetworkError, TimedOut,
+                                    RetryAfter, TelegramError)
+        err = context.error
+        if isinstance(err, RetryAfter):
+            logger.warning(f"⏳ RetryAfter: {err.retry_after}s kutamiz")
+            await asyncio.sleep(err.retry_after)
+        elif isinstance(err, (NetworkError, TimedOut)):
+            logger.warning(f"🌐 Tarmoq xatosi — qayta ulaniladi: {err}")
+            await asyncio.sleep(5)
+        elif isinstance(err, TelegramError):
+            logger.error(f"❌ Telegram xatosi: {err}")
+        else:
+            logger.error(f"❌ Kutilmagan xato: {err}\n{traceback.format_exc()}")
+
+    app.add_error_handler(error_handler)
+
     logger.info(f"🚀 Bot v20 Railway ishga tushdi! RAM: {len(RAM.movies)} kino, {len(RAM.users)} user")
-    app.run_polling(drop_pending_updates=True, allowed_updates=[
-        "message", "callback_query", "chat_join_request"
-    ])
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query", "chat_join_request"],
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=15,
+        pool_timeout=30,
+    )
 
 
 if __name__ == "__main__":

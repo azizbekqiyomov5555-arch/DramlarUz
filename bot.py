@@ -2155,6 +2155,7 @@ async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
     """
     Videoni foydalanuvchiga watermark bilan yuboradi.
     ffmpeg mavjud bo'lmasa yoki xato bo'lsa — oddiy video yuboriladi.
+    45 soniyadan oshsa — originalni yuborib, kutmaymiz.
     """
     # Har safar runtime da tekshiramiz (modul yuklanganda emas)
     if not _check_ffmpeg():
@@ -2164,31 +2165,42 @@ async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
     tmp_in  = None
     tmp_out = None
     try:
-        # 1) Telegram faylini yuklab olamiz
-        tg_file = await bot.get_file(file_id)
-        suffix  = ".mp4"
+        async def _do_watermark():
+            nonlocal tmp_in, tmp_out
+            # 1) Telegram faylini yuklab olamiz
+            tg_file = await bot.get_file(file_id)
+            suffix  = ".mp4"
 
-        # Vaqtinchalik fayllar
-        fd_in,  tmp_in  = tempfile.mkstemp(suffix=suffix, prefix="wm_in_")
-        fd_out, tmp_out = tempfile.mkstemp(suffix=suffix, prefix="wm_out_")
-        os.close(fd_in)
-        os.close(fd_out)
+            # Vaqtinchalik fayllar
+            fd_in,  tmp_in  = tempfile.mkstemp(suffix=suffix, prefix="wm_in_")
+            fd_out, tmp_out = tempfile.mkstemp(suffix=suffix, prefix="wm_out_")
+            os.close(fd_in)
+            os.close(fd_out)
 
-        # Video yuklab olamiz
-        await tg_file.download_to_drive(tmp_in)
-        logger.info(f"Watermark: {file_id[:20]}... yuklab olindi ({os.path.getsize(tmp_in)//1024} KB)")
+            # Video yuklab olamiz
+            await tg_file.download_to_drive(tmp_in)
+            logger.info(f"Watermark: {file_id[:20]}... yuklab olindi ({os.path.getsize(tmp_in)//1024} KB)")
 
-        # ffmpeg watermark — alohida threadda (bloklash uchun)
-        success = await asyncio.to_thread(_add_watermark_ffmpeg, tmp_in, tmp_out, str(user_id))
+            # ffmpeg watermark — alohida threadda (bloklash uchun)
+            success = await asyncio.to_thread(_add_watermark_ffmpeg, tmp_in, tmp_out, str(user_id))
 
-        if success and os.path.getsize(tmp_out) > 1000:
-            logger.info(f"Watermark: muvaffaqiyatli ({os.path.getsize(tmp_out)//1024} KB)")
-            with open(tmp_out, "rb") as vf:
-                return await sv(bot, chat_id, vf, caption, markup, pm, protect)
-        else:
-            logger.warning("Watermark: ffmpeg muvaffaqiyatsiz — originalni yuboramiz")
+            if success and os.path.getsize(tmp_out) > 1000:
+                logger.info(f"Watermark: muvaffaqiyatli ({os.path.getsize(tmp_out)//1024} KB)")
+                with open(tmp_out, "rb") as vf:
+                    return await sv(bot, chat_id, vf, caption, markup, pm, protect)
+            else:
+                logger.warning("Watermark: ffmpeg muvaffaqiyatsiz — originalni yuboramiz")
+                return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
+
+        # ── 45 soniya timeout — bot qotib qolmasin ──
+        return await asyncio.wait_for(_do_watermark(), timeout=45.0)
+
+    except asyncio.TimeoutError:
+        logger.warning(f"sv_watermarked: 45s timeout — originalni yuboramiz")
+        try:
             return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
-
+        except Exception as e2:
+            logger.error(f"sv_watermarked timeout fallback xato: {e2}")
     except Exception as e:
         logger.error(f"sv_watermarked xato: {e}")
         # Xato bo'lsa oddiy video yuboramiz
@@ -4011,6 +4023,8 @@ async def cb_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    # ── Darhol Telegram'ga javob beramiz — "tugma bosildi" (10s timeout bor) ──
+    await q.answer("⏳ Video tayyorlanmoqda...")
     parts = q.data.split("|")
     if len(parts) != 3: return
     _, code, ep = parts
@@ -4093,6 +4107,18 @@ async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_me    = await context.bot.get_me()
     share_url = f"https://t.me/share/url?url=https://t.me/{bot_me.username}?start=code_{code}"
     caption   = f"🎬 <b>{movie.get('title')}</b>\n📺 Qism: <b>{ep}</b>"
+
+    # ── Darhol "Yuklanmoqda" xabari — foydalanuvchi bot qotib qoldi deb o'ylamasin ──
+    loading_msg = None
+    try:
+        loading_msg = await context.bot.send_message(
+            chat_id=q.from_user.id,
+            text="⏳ <b>Video yuklanmoqda...</b>\nBiroz kuting ☕",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
     try:
         # Watermark bilan yuboramiz — foydalanuvchi ID raqami videoda ko'rinadi
         await sv_watermarked(
@@ -4103,7 +4129,16 @@ async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Video yuborishda xato: {e}")
         await sm(context.bot, q.from_user.id, "❌ Video yuborishda xato. Qayta urinib ko'ring.")
-        return
+    finally:
+        # "Yuklanmoqda" xabarini o'chiramiz
+        if loading_msg:
+            try:
+                await context.bot.delete_message(
+                    chat_id=q.from_user.id,
+                    message_id=loading_msg.message_id
+                )
+            except Exception:
+                pass
 
     async def update_stats():
         try:

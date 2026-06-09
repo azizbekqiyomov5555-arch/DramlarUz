@@ -22,14 +22,14 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters,
 )
 
 # ─── KONFIGURATSIYA ────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or "8723400610:AAEFHdluEW7eZh2vnRHgCFbUrSjL3K3BAJ0"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")  or ""
 ADMIN_ID   = int(os.environ.get("ADMIN_ID") or "8537782289")
 
 DATABASE_URL      = os.environ.get("DATABASE_URL") or ""
@@ -483,6 +483,18 @@ def _bot_flood_ok(uid: int) -> bool:
         return len(times) <= BOT_FLOOD_MAX
 
 
+_BOT_USERNAME_CACHE: str = ""
+
+async def _get_bot_username(bot) -> str:
+    """Bot username ni bir marta oladi va cache ga saqlaydi."""
+    global _BOT_USERNAME_CACHE
+    if _BOT_USERNAME_CACHE:
+        return _BOT_USERNAME_CACHE
+    me = await bot.get_me()
+    _BOT_USERNAME_CACHE = me.username or ""
+    return _BOT_USERNAME_CACHE
+
+
 async def _apply_spam_action(bot, uid: int, reason: str) -> bool:
     """
     Spam harakat bajaradi. True qaytarsa — xabarni to'xtatish kerak.
@@ -596,6 +608,7 @@ DEFAULT_BTN = {
     "kanal_post":     _B('Kanalga post'),
     "maj_kanal":      _B('Majburiy kanal'),
     "karta":          _B('Karta raqami'),
+    "ilova":          _B('Bot qollanma video'),
     "emoji_soz":      _B('Emoji sozlamalari'),
     "asosiy":         _B('Asosiy menyu'),
     "boshqarish":     _B('Boshqarish'),
@@ -629,6 +642,7 @@ DEFAULT_BTN = {
     "soruvli_kanal":  _B("So'rovli kanal qo'shish"),
     "qism_tahrir":    _B('Qismlarni tahrirlash'),
     "admin_qosh":     _B('Admin qoshish'),
+    "admin_lichka_set": _B("👤 Admin lichkasini qo'shish"),
     "qism_och":       _B("Qism ochish"),
     "premium_ber":    _B('Premium berish'),
     "start_xab":      _B('Start xabarni ozgartirish'),
@@ -642,6 +656,7 @@ DEFAULT_BTN = {
     "premium_plan_manage": _B("💎 Pryum tariflar"),
     "referral_narxi":     _B("Referral narxi"),
     "dost_taklif":        _B("Do'st taklif qilish"),
+    "top_referrers":      _B("🏆 Referral yiqanlar"),
     "post_nomi":          "🎭",
     "post_qism":          "🎞",
     "post_kod":           "🔑",
@@ -664,6 +679,7 @@ BTN_LABELS = {
     "kanal_post":    "Kanalga post",
     "maj_kanal":     "Majburiy kanal",
     "karta":         "Karta raqami",
+    "ilova":         "Bot qo'llanma video",
     "emoji_soz":     "Emoji sozlamalari",
     "asosiy":        "Asosiy menyu",
     "boshqarish":    "⚙️ Boshqarish",
@@ -700,6 +716,7 @@ BTN_LABELS["soruvli_kanal"] = "So'rovli kanal qo'shish"
 BTN_LABELS["admin_panel"]  = "Admin panel (orqaga)"
 BTN_LABELS["qism_tahrir"]  = "Qismlarni tahrirlash"
 BTN_LABELS["admin_qosh"]   = "Admin qo'shish"
+BTN_LABELS["admin_lichka_set"] = "Admin lichkasini qo'shish"
 BTN_LABELS["qism_och"]    = "Qism ochish"
 BTN_LABELS["premium_ber"]  = "Premium berish"
 BTN_LABELS["start_xab"]    = "Start xabarni o'zgartirish"
@@ -717,6 +734,7 @@ BTN_LABELS["kanal_btn"]    = "Kanal tugmasi"
 BTN_LABELS["premium_plan_manage"] = "Pryum tariflar boshqaruvi"
 BTN_LABELS["referral_narxi"]     = "Referral narxi"
 BTN_LABELS["dost_taklif"]      = "Do'st taklif qilish"
+BTN_LABELS["top_referrers"]    = "🏆 Referral yiqanlar"
 LABEL_TO_KEY = {v: k for k, v in BTN_LABELS.items()}
 
 # ══════════════════════════════════════════════════════════
@@ -1555,8 +1573,7 @@ def rkb(rows, resize=True):
 def main_menu_kb(is_admin=False):
     rows = [[
         rbtn(bt("yordam"),  style="danger", emoji_id=get_eid("yordam")),
-        rbtn(bt("install"), style="success", emoji_id=get_eid("install"),
-             web_app_url="https://www.youtube.com/@DramlarUz"),
+        rbtn(bt("install"), style="success", emoji_id=get_eid("install")),
     ], [
         rbtn(bt("barcha_kino"), style="primary", emoji_id=get_eid("barcha_kino")),
         rbtn(bt("balans"),      style="success", emoji_id=get_eid("balans")),
@@ -1577,6 +1594,7 @@ def admin_menu_kb(uid=None):
         ("kanal_post",     "primary"),
         ("maj_kanal",      "danger"),
         ("karta",          "success"),
+        ("ilova",          "primary"),
         ("kino_kanal_set", "success"),
         ("emoji_soz",      "primary"),
         ("qism_tahrir",    "primary"),
@@ -1588,6 +1606,7 @@ def admin_menu_kb(uid=None):
         ("foydalanuvchi_blok", "danger"),
         ("premium_plan_manage", "success"),
         ("referral_narxi", "primary"),
+        ("top_referrers",  "success"),
     ]
     if uid is not None and not is_super_admin(uid):
         pairs = [(k, st) for (k, st) in pairs if has_perm(uid, k)]
@@ -1599,6 +1618,7 @@ def admin_menu_kb(uid=None):
     if buf: rows.append(buf)
     if uid is None or is_super_admin(uid):
         rows.append([rbtn(bt("admin_qosh"), style="success", emoji_id=get_eid("admin_qosh"))])
+        rows.append([rbtn(bt("admin_lichka_set"), style="primary")])
     rows.append([rbtn(bt("asosiy"), style="success", emoji_id=get_eid("asosiy"))])
     return rkb(rows)
 
@@ -3278,11 +3298,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         start_inline_rows = [[kod_btn]]
 
-    # "Qo'llanma" tugmasi — doim ko'rinadi, mini ilova ochadi
-    start_inline_rows.append([
-        ibtn(bt("install"), url="https://www.youtube.com/@DramlarUz",
-             style="success", emoji_id=get_eid("install"))
-    ])
+    # "Qo'llanma" tugmasi — install_video_id bo'lsa qo'shiladi
+    if RAM.settings.get("install_video_id"):
+        start_inline_rows.append([
+            ibtn(bt("install"), data="start_qollanma", style="success",
+                 emoji_id=get_eid("install"))
+        ])
 
     inline_kb = ikb(start_inline_rows)
 
@@ -3332,6 +3353,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "start_kod":
         await sm(context.bot, uid,
                  "🎬 Kino <b>kodini</b> yuboring — video darhol keladi!")
+        return
+
+    if data == "start_qollanma":
+        vid_id = RAM.settings.get("install_video_id")
+        if vid_id:
+            cap = RAM.settings.get("install_caption") or "📖 <b>Bot qo'llanmasi</b>"
+            # Bot haqida qo'shimcha ma'lumot — blockquote formatida
+            cap += (
+                "\n\n"
+                "<blockquote>"
+                "ℹ️ <b>Bot haqida:</b>\n\n"
+                "🎬 Ushbu bot orqali kinolarni qulay tarzda tomosha qilishingiz mumkin.\n"
+                "🔍 Kino kodini yuboring va video darhol keladi!\n"
+                "💰 Balans tizimi orqali pullik qismlarni sotib olishingiz mumkin.\n"
+                "📡 Yangi kinolardan xabardor bo'lish uchun kanalimizga obuna bo'ling.\n\n"
+                "💳 <b>Balansni qanday to'ldirish:</b>\n\n"
+                "1️⃣ Pastdagi <b>«Balans»</b> tugmasini bosing\n"
+                "2️⃣ <b>«Hisobni to'ldirish»</b> tugmasini bosing\n"
+                "3️⃣ To'ldirmoqchi bo'lgan <b>miqdorni</b> kiriting\n"
+                "4️⃣ Bot sizga <b>karta raqamini</b> yuboradi — to'lang\n"
+                "5️⃣ To'lov o'tishi bilan balans <b>avtomatik</b> hisobingizga qo'shiladi!\n\n"
+                "⚠️ <b>Diqqat:</b> 1 so'm yoki undan ko'proq tashlasangiz — "
+                "pul hisobingizga <b>tushmaydi!</b> Faqat <b>aniq miqdorni</b> to'lang."
+                "</blockquote>"
+            )
+            # Admin lichkasi tugmasi
+            admin_lichka = (RAM.settings.get("admin_lichka") or "").strip().lstrip("@")
+            kb = None
+            if admin_lichka:
+                kb = ikb([[ibtn("👤 Admin lichkasi", url=f"https://t.me/{admin_lichka}",
+                                style="danger", emoji_id=get_eid("admin_lichka_set"))]])
+            try:
+                await sv(context.bot, uid, vid_id, cap, kb)
+            except Exception as e:
+                await sm(context.bot, uid, f"❌ Video yuborishda xato: {e}")
+        else:
+            await q.answer("Qo'llanma videosi hali o'rnatilmagan!", show_alert=True)
         return
 
     if data.startswith("kino_list|"):
@@ -4933,11 +4991,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_any_admin(uid):
         all_admin_btn_keys = [
             "kino_joy", "qism_qosh", "pullik", "stat",
-            "kanal_post", "maj_kanal", "karta",
+            "kanal_post", "maj_kanal", "karta", "ilova",
             "emoji_soz", "asosiy", "boshqarish", "broadcast", "kino_uch",
             "kino_kanal_set", "qism_tahrir", "admin_qosh",
             "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
             "tolovlar", "premium_plan_manage", "referral_narxi",
+            "admin_lichka_set", "top_referrers",
         ]
         # Ham to'liq matn, ham emoji-siz matn bilan tekshiramiz
         all_admin_btns = {}
@@ -4958,6 +5017,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             if key == "admin_qosh" and not is_super_admin(uid):
                 await sm(context.bot, uid, "⛔ Faqat asosiy admin yangi admin qo'sha oladi.", admin_menu_kb(uid))
+                return
+            if key == "admin_lichka_set":
+                if not is_super_admin(uid):
+                    await sm(context.bot, uid, "⛔ Faqat asosiy admin lichka o'rnatishi mumkin.", admin_menu_kb(uid))
+                    return
+                clear_admin_state(context)
+                context.user_data.pop("emoji_menu", None)
+                context.user_data["admin_state"] = "set_admin_lichka"
+                cur_lichka = (RAM.settings.get("admin_lichka") or "").strip()
+                cur_info = f"\n\nJoriy admin username: <code>@{cur_lichka}</code>" if cur_lichka else "\n\n<i>Hali o'rnatilmagan</i>"
+                await sm(context.bot, uid,
+                    f"👤 <b>Admin lichkasini qo'shish / o'chirish</b>{cur_info}\n\n"
+                    f"Admin <b>@username</b>ini kiriting\n"
+                    f"<i>O'chirish uchun <code>0</code> kiriting</i>")
                 return
             if key == "emoji_soz":
                 clear_admin_state(context)
@@ -5001,14 +5074,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if _main_btn("install"):
-        # Mini ilova (WebApp) to'g'ridan-to'g'ri reply tugmadan ochiladi.
-        # Agar foydalanuvchi matn orqali kelsa — inline tugma ko'rsatamiz.
-        web_url = "https://azizbekqiyomov5555-arch.github.io/Kkk/"
-        kb = ikb([[ibtn(bt("install"), web_app_url=web_url, style="success",
-                        emoji_id=get_eid("install"))]])
-        await sm(context.bot, uid,
-                 "📖 <b>Qo'llanmani ko'rish uchun quyidagi tugmani bosing:</b>",
-                 kb)
+        v_id = RAM.settings.get("install_video_id")
+        if not v_id:
+            await sm(context.bot, uid, "📹 Admin hali bot qo'llanma videosini joylamagan.")
+            return
+        cap = (RAM.settings.get("install_caption") or "").strip()
+        if not cap:
+            cap = "<b>Bot qo'llanma videosi</b>"
+        # Bot haqida qo'shimcha ma'lumot — blockquote formatida
+        cap += (
+            "\n\n"
+            "<blockquote>"
+            "ℹ️ <b>Bot haqida:</b>\n\n"
+            "🎬 Ushbu bot orqali kinolarni qulay tarzda tomosha qilishingiz mumkin.\n"
+            "🔍 Kino kodini yuboring va video darhol keladi!\n"
+            "💰 Balans tizimi orqali pullik qismlarni sotib olishingiz mumkin.\n"
+            "📡 Yangi kinolardan xabardor bo'lish uchun kanalimizga obuna bo'ling.\n\n"
+            "💳 <b>Balansni qanday to'ldirish:</b>\n\n"
+            "1️⃣ Pastdagi <b>«Balans»</b> tugmasini bosing\n"
+            "2️⃣ <b>«Hisobni to'ldirish»</b> tugmasini bosing\n"
+            "3️⃣ To'ldirmoqchi bo'lgan <b>miqdorni</b> kiriting\n"
+            "4️⃣ Bot sizga <b>karta raqamini</b> yuboradi — to'lang\n"
+            "5️⃣ To'lov o'tishi bilan balans <b>avtomatik</b> hisobingizga qo'shiladi!\n\n"
+            "⚠️ <b>Diqqat:</b> 1 so'm yoki undan ko'proq tashlasangiz — "
+            "pul hisobingizga <b>tushmaydi!</b> Faqat <b>aniq miqdorni</b> to'lang."
+            "</blockquote>"
+        )
+        # Admin lichkasi tugmasi
+        admin_lichka = (RAM.settings.get("admin_lichka") or "").strip().lstrip("@")
+        kb = None
+        if admin_lichka:
+            kb = ikb([[ibtn("👤 Admin lichkasi", url=f"https://t.me/{admin_lichka}",
+                            style="danger", emoji_id=get_eid("admin_lichka_set"))]])
+        await sv(context.bot, uid, v_id, cap, kb)
         return
 
     if _main_btn("barcha_kino"):
@@ -5029,13 +5127,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_earn  = int(u_data.get("referral_earnings") or 0)
         name      = user_obj.full_name or "Noma'lum"
         txt = (
-            f"💰 <b>Balansingiz</b>\n\n"
-            f"👤 Ism: <b>{name}</b>\n"
-            f"🆔 ID: <code>{uid}</code>\n\n"
-            f"💵 Joriy balans: <b>{balance:,} so'm</b>\n"
-            f"📥 Jami kiritilgan: <b>{topup_tot:,} so'm</b>\n"
-            f"👥 Taklif qilgan do'stlar: <b>{ref_count} ta</b>\n"
-            f"🎁 Referral daromad: <b>{ref_earn:,} so'm</b>"
+            f'<tg-emoji emoji-id="5228841963817570494">💰</tg-emoji> <b>Balansingiz</b>\n\n'
+            f'<tg-emoji emoji-id="5818715087237549366">👤</tg-emoji> Ism: <b>{name}</b>\n'
+            f'<tg-emoji emoji-id="5818885490065017876">🆔</tg-emoji> ID: <code>{uid}</code>\n\n'
+            f'<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji> Joriy balans: <b>{balance:,} so\'m</b>\n'
+            f'<tg-emoji emoji-id="5443127283898405358">📥</tg-emoji> Jami kiritilgan: <b>{topup_tot:,} so\'m</b>\n'
+            f'<tg-emoji emoji-id="5453957997418004470">👥</tg-emoji> Taklif qilgan do\'stlar: <b>{ref_count} ta</b>\n'
+            f'<tg-emoji emoji-id="5193085063998224234">🎁</tg-emoji> Referral daromad: <b>{ref_earn:,} so\'m</b>'
         )
         sent_balans = await sm(context.bot, uid, txt, balans_kb())
         if sent_balans:
@@ -5054,12 +5152,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👉 {ref_link}"
         )
         txt = (
-            f"🎁 <b>Do'st taklif qilish</b>\n\n"
+            f'<tg-emoji emoji-id="5193085063998224234">🎁</tg-emoji> <b>Do\'st taklif qilish</b>\n\n'
             f"Sizning referral havolangiz:\n"
             f"<code>{ref_link}</code>\n\n"
-            f"👥 Hozircha taklif qilgan do'stlar: <b>{ref_count} ta</b>\n"
-            f"💰 Har bir do'st uchun: <b>{amount:,} so'm</b>\n\n"
-            f"Do'stlaringizga ulashing va pul ishlang! 🚀"
+            f'<tg-emoji emoji-id="5453957997418004470">👥</tg-emoji> Hozircha taklif qilgan do\'stlar: <b>{ref_count} ta</b>\n'
+            f'<tg-emoji emoji-id="5228841963817570494">💰</tg-emoji> Har bir do\'st uchun: <b>{amount:,} so\'m</b>\n\n'
+            f"Do\'stlaringizga ulashing va pul ishlang! 🚀"
         )
         kb = ikb([
             [ibtn("📤 Ulashish", url=f"https://t.me/share/url?url={ref_link}&text={share_text.replace('<b>', '').replace('</b>', '')}", style="success")],
@@ -5226,10 +5324,48 @@ async def admin_buttons(update, context, text: str):
             f"Yangi miqdorni kiriting (faqat raqam):")
         return
 
+    if _btn_match("top_referrers"):
+        if not is_any_admin(uid): return
+        # Top 15 referral yig'ganlar
+        scored = []
+        for u_id_str, u_data in RAM.users.items():
+            ref_count = len(u_data.get("referred_users") or [])
+            if ref_count > 0:
+                scored.append((u_id_str, u_data, ref_count))
+        scored.sort(key=lambda x: x[2], reverse=True)
+        top = scored[:15]
+        if not top:
+            await sm(context.bot, uid,
+                "📭 <b>Hali hech kim referral yig'magan.</b>", admin_menu_kb(uid))
+            return
+        lines = ["🏆 <b>Referral yig'ganlar — Top 15</b>\n"]
+        medals = ["🥇","🥈","🥉"] + ["🏅"]*12
+        for i, (u_id_str, u_data, ref_count) in enumerate(top):
+            name   = u_data.get("name") or u_data.get("first_name") or f"ID:{u_id_str}"
+            uname  = u_data.get("username") or ""
+            uname_txt = f"@{uname}" if uname else "—"
+            earnings = int(u_data.get("referral_earnings") or 0)
+            lines.append(
+                f"{medals[i]} <b>{i+1}.</b> {name}\n"
+                f"   👤 {uname_txt}  |  🆔 <code>{u_id_str}</code>\n"
+                f"   👥 Yig'ganlar: <b>{ref_count} ta</b>  |  💰 <b>{earnings:,} so'm</b>"
+            )
+        await sm(context.bot, uid, "\n".join(lines),
+                 ikb([[ibtn("🔄 Yangilash", data="top_ref_refresh", style="primary"),
+                       ibtn("⬅️ Orqaga",   data="go_admin_panel",  style="success")]]))
+        return
+
     if _btn_match("karta"):
         context.user_data["admin_state"] = "set_card"
         cur = RAM.card_number or "Kiritilmagan"
         await sm(context.bot, uid, f"Joriy karta: <code>{cur}</code>\n\nYangi karta raqamini yuboring:")
+        return
+
+    if _btn_match("ilova"):
+        context.user_data["admin_state"] = "set_install"
+        await sm(context.bot, uid,
+            "📹 <b>Bot qo'llanma videosi</b>\n\n"
+            "Video yuboring:")
         return
 
     if _btn_match("kino_joy"):
@@ -5519,6 +5655,25 @@ async def admin_state_handler(update, context, text: str) -> bool:
         await schedule_save()
         context.user_data.pop("admin_state", None)
         await sm(context.bot, uid, f"✅ Karta saqlandi: <code>{text}</code>", admin_menu_kb(uid))
+        return True
+
+    if state == "set_admin_lichka":
+        val = text.strip().lstrip("@")
+        if val == "0":
+            RAM.settings["admin_lichka"] = ""
+            asyncio.create_task(save_now())
+            context.user_data.pop("admin_state", None)
+            await sm(context.bot, uid, "✅ Admin lichkasi o'chirildi.", admin_menu_kb(uid))
+        elif val:
+            RAM.settings["admin_lichka"] = val
+            asyncio.create_task(save_now())
+            context.user_data.pop("admin_state", None)
+            await sm(context.bot, uid,
+                f"✅ Admin lichkasi saqlandi: <code>@{val}</code>\n\n"
+                f"Endi «Qo'llanma video» tugmasida 👤 <b>Admin lichkasi</b> tugmasi ko'rinadi.",
+                admin_menu_kb(uid))
+        else:
+            await sm(context.bot, uid, "⚠️ Username kiriting (masalan: @username) yoki o'chirish uchun <code>0</code>:")
         return True
 
     if state == "set_kino_kanal":
@@ -6959,15 +7114,11 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_any_admin(uid) and state == "set_install":
         if msg.video:
             RAM.settings["install_video_id"] = msg.video.file_id
-            # caption (premium emojilar bilan) — agar yuborilgan bo'lsa
-            cap_html = text_with_premium_emojis(msg) if msg.caption else ""
-            if cap_html:
-                RAM.settings["install_caption"] = cap_html
+            RAM.settings["install_caption"] = ""  # caption kodda avtomatik yoziladi
             await save_now()
             context.user_data.pop("admin_state", None)
-            cap_info = "\n📝 Caption ham saqlandi." if cap_html else ""
             await sm(context.bot, uid,
-                f"✅ Bot qo'llanma videosi saqlandi!{cap_info}",
+                f"✅ Bot qo'llanma videosi saqlandi!",
                 admin_menu_kb(uid))
         else:
             await sm(context.bot, uid, "⚠️ Faqat <b>video</b> yuboring (document/fayl emas):")
@@ -7670,6 +7821,40 @@ async def cb_premium_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await q.edit_message_reply_markup(reply_markup=None)
         except: pass
         await sm(context.bot, uid, "<b>Admin panel</b>", admin_menu_kb(uid))
+        return
+
+    # ── Top referral yig'ganlar yangilash ──
+    if data == "top_ref_refresh":
+        if not is_any_admin(uid): return
+        scored = []
+        for u_id_str, u_data in RAM.users.items():
+            ref_count = len(u_data.get("referred_users") or [])
+            if ref_count > 0:
+                scored.append((u_id_str, u_data, ref_count))
+        scored.sort(key=lambda x: x[2], reverse=True)
+        top = scored[:15]
+        if not top:
+            try: await q.edit_message_text("📭 <b>Hali hech kim referral yig'magan.</b>", parse_mode="HTML")
+            except: pass
+            return
+        lines = ["🏆 <b>Referral yig'ganlar — Top 15</b>\n"]
+        medals = ["🥇","🥈","🥉"] + ["🏅"]*12
+        for i, (u_id_str, u_data, ref_count) in enumerate(top):
+            name   = u_data.get("name") or u_data.get("first_name") or f"ID:{u_id_str}"
+            uname  = u_data.get("username") or ""
+            uname_txt = f"@{uname}" if uname else "—"
+            earnings = int(u_data.get("referral_earnings") or 0)
+            lines.append(
+                f"{medals[i]} <b>{i+1}.</b> {name}\n"
+                f"   👤 {uname_txt}  |  🆔 <code>{u_id_str}</code>\n"
+                f"   👥 Yig'ganlar: <b>{ref_count} ta</b>  |  💰 <b>{earnings:,} so'm</b>"
+            )
+        new_text = "\n".join(lines)
+        new_kb = ikb([[ibtn("🔄 Yangilash", data="top_ref_refresh", style="primary"),
+                       ibtn("⬅️ Orqaga",   data="go_admin_panel",  style="success")]])
+        try: await q.edit_message_text(new_text, parse_mode="HTML", reply_markup=new_kb)
+        except: pass
+        await q.answer("✅ Yangilandi!")
         return
 
 

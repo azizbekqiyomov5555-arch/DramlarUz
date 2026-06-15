@@ -52,6 +52,11 @@ LOCAL_MOVIES_FILE = "movies_backup.json"
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Katta videolarda Telegram upload/download 30 soniyada uzilib qolmasligi uchun.
+VIDEO_IO_TIMEOUT = int(os.environ.get("VIDEO_IO_TIMEOUT") or "600")
+TELEGRAM_SAFE_UPLOAD_LIMIT_MB = int(os.environ.get("TELEGRAM_SAFE_UPLOAD_LIMIT_MB") or "48")
+TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES = TELEGRAM_SAFE_UPLOAD_LIMIT_MB * 1024 * 1024
+
 # ─── BOT YARATISH NARXI VA TARIFLAR ─────────────────────────
 BOT_CREATE_PRICE = 150_000        # so'm — birinchi marta bot yaratish
 BOT_TRIAL_DAYS   = 30             # sotib olgandan so'ng tekin kunlar
@@ -2776,21 +2781,318 @@ def _find_font() -> str:
     return ""
 
 
+def _probe_video_info(path: str):
+    """ffprobe orqali video width/height/duration ni o'qiydi. Telegram native ko'rinishi uchun kerak."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=width,height:format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=0",
+             path],
+            capture_output=True, timeout=15, text=True,
+        )
+        w = h = 0
+        d = 0
+        for line in r.stdout.splitlines():
+            if line.startswith("width="):
+                try: w = int(line.split("=", 1)[1])
+                except: pass
+            elif line.startswith("height="):
+                try: h = int(line.split("=", 1)[1])
+                except: pass
+            elif line.startswith("duration="):
+                try: d = int(float(line.split("=", 1)[1]))
+                except: pass
+        return w, h, d
+    except Exception as e:
+        logger.warning(f"ffprobe xato: {e}")
+        return 0, 0, 0
+
+
+def _make_video_thumb(video_path: str):
+    """Video uchun 1-soniyadan thumbnail yaratadi (Telegram preview uchun)."""
+    try:
+        fd, thumb_path = tempfile.mkstemp(suffix=".jpg", prefix="wm_thumb_")
+        os.close(fd)
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-ss", "1", "-i", video_path,
+             "-frames:v", "1",
+             "-vf", "scale='min(320,iw)':-2",
+             "-q:v", "5",
+             thumb_path],
+            capture_output=True, timeout=20,
+        )
+        if r.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 100:
+            return thumb_path
+        try: os.unlink(thumb_path)
+        except Exception: pass
+        return None
+    except Exception as e:
+        logger.warning(f"thumb yaratishda xato: {e}")
+        return None
+
+
+async def _download_tg_file_safely(tg_file, target_path: str):
+    """Telegram'dan katta fayllarni ham timeout bermasdan yuklab olishga urinadi."""
+    try:
+        return await tg_file.download_to_drive(
+            target_path,
+            read_timeout=VIDEO_IO_TIMEOUT,
+            write_timeout=VIDEO_IO_TIMEOUT,
+            connect_timeout=VIDEO_IO_TIMEOUT,
+            pool_timeout=VIDEO_IO_TIMEOUT,
+        )
+    except TypeError:
+        return await tg_file.download_to_drive(target_path)
+
+
+def _compress_video_to_telegram_limit(input_path: str):
+    """50MB chegaradan oshgan videoni razmerini o'zgartirmasdan qayta siqadi."""
+    try:
+        original_size = os.path.getsize(input_path)
+        if original_size <= TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES:
+            return input_path, None
+
+        _, _, duration = _probe_video_info(input_path)
+        if not duration or duration <= 0:
+            logger.warning("Video hajmi katta, lekin duration topilmadi — siqish o'tkazib yuborildi")
+            return input_path, None
+
+        logger.warning(
+            f"Video {original_size // 1024 // 1024}MB — Telegram limiti uchun siqiladi "
+            f"(limit {TELEGRAM_SAFE_UPLOAD_LIMIT_MB}MB)"
+        )
+        best_path = None
+        best_size = original_size
+        attempts = [(0.92, 96_000), (0.80, 64_000), (0.68, 48_000)]
+        for ratio, audio_bps in attempts:
+            fd, out_path = tempfile.mkstemp(suffix=".mp4", prefix="wm_small_")
+            os.close(fd)
+            target_total_bps = int((TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES * 8 * ratio) / max(duration, 1))
+            video_bps = max(160_000, target_total_bps - audio_bps)
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", input_path,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-b:v", str(video_bps),
+                "-maxrate", str(int(video_bps * 1.25)),
+                "-bufsize", str(int(video_bps * 2)),
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", str(audio_bps),
+                "-movflags", "+faststart",
+                out_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=900)
+            if result.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 1000:
+                err = result.stderr.decode("utf-8", errors="replace")
+                logger.warning(f"Video siqish urinishi xato: {err[:800]}")
+                try: os.unlink(out_path)
+                except Exception: pass
+                continue
+
+            out_size = os.path.getsize(out_path)
+            if out_size < best_size:
+                if best_path and os.path.exists(best_path):
+                    try: os.unlink(best_path)
+                    except Exception: pass
+                best_path, best_size = out_path, out_size
+            else:
+                try: os.unlink(out_path)
+                except Exception: pass
+
+            if out_size <= TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES:
+                logger.info(f"Video siqildi: {out_size // 1024 // 1024}MB")
+                return out_path, out_path
+
+        if best_path:
+            logger.warning(f"Video siqildi, lekin limitdan katta qolishi mumkin: {best_size // 1024 // 1024}MB")
+            return best_path, best_path
+    except Exception as e:
+        logger.warning(f"Video siqishda xato: {e}")
+    return input_path, None
+
+
+async def _send_video_file_safely(bot, chat_id: int, video_path: str, caption: str,
+                                  markup=None, pm="HTML", protect=False):
+    """Tayyor videoni Telegram'ga timeoutlarni uzaytirib, bir nechta fallback bilan yuboradi."""
+    from telegram import InputFile
+    from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
+
+    width, height, duration = _probe_video_info(video_path)
+    thumb_path = _make_video_thumb(video_path)
+    base_kw = {
+        "chat_id": chat_id,
+        "caption": caption,
+        "parse_mode": pm,
+        "supports_streaming": True,
+    }
+    if markup: base_kw["reply_markup"] = markup
+    if protect: base_kw["protect_content"] = True
+    if width and height:
+        base_kw["width"] = width
+        base_kw["height"] = height
+    if duration:
+        base_kw["duration"] = duration
+
+    def _timeout_kw():
+        return {
+            "read_timeout": VIDEO_IO_TIMEOUT,
+            "write_timeout": VIDEO_IO_TIMEOUT,
+            "connect_timeout": VIDEO_IO_TIMEOUT,
+            "pool_timeout": VIDEO_IO_TIMEOUT,
+        }
+
+    async def _try_send_video(use_thumb: bool, use_meta: bool):
+        kw = dict(base_kw)
+        if not use_meta:
+            kw.pop("width", None)
+            kw.pop("height", None)
+            kw.pop("duration", None)
+        kw.update(_timeout_kw())
+        with open(video_path, "rb") as vf:
+            kw["video"] = InputFile(vf, filename="video.mp4")
+            if use_thumb and thumb_path and os.path.exists(thumb_path):
+                with open(thumb_path, "rb") as th:
+                    kw["thumbnail"] = InputFile(th, filename="thumb.jpg")
+                    return await bot.send_video(**kw)
+            return await bot.send_video(**kw)
+
+    async def _try_send_document():
+        kw = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "parse_mode": pm,
+        }
+        if markup: kw["reply_markup"] = markup
+        if protect: kw["protect_content"] = True
+        kw.update(_timeout_kw())
+        with open(video_path, "rb") as vf:
+            kw["document"] = InputFile(vf, filename="video.mp4")
+            return await bot.send_document(**kw)
+
+    last_error = None
+    try:
+        send_variants = [(True, True), (False, True), (False, False)]
+        for attempt in range(1, 4):
+            for use_thumb, use_meta in send_variants:
+                try:
+                    return await _try_send_video(use_thumb, use_meta)
+                except TypeError:
+                    with open(video_path, "rb") as vf:
+                        kw = dict(base_kw)
+                        if not use_meta:
+                            kw.pop("width", None)
+                            kw.pop("height", None)
+                            kw.pop("duration", None)
+                        kw["video"] = vf
+                        return await bot.send_video(**kw)
+                except RetryAfter as e:
+                    last_error = e
+                    logger.warning(f"send_video RetryAfter: {e.retry_after}s")
+                    await asyncio.sleep(float(e.retry_after) + 1)
+                except (TimedOut, NetworkError) as e:
+                    last_error = e
+                    logger.warning(f"send_video urinish {attempt}/3 tarmoq xatosi: {e}")
+                    break
+                except BadRequest as e:
+                    last_error = e
+                    logger.warning(f"send_video varianti o'tmadi (thumb={use_thumb}, meta={use_meta}): {e}")
+                    continue
+                except TelegramError as e:
+                    last_error = e
+                    logger.warning(f"send_video Telegram xato: {e}")
+                    continue
+            if attempt < 3:
+                await asyncio.sleep(2 * attempt)
+
+        logger.warning(f"send_video bo'lmadi, document fallback qilinadi: {last_error}")
+        return await _try_send_document()
+    finally:
+        if thumb_path and os.path.exists(thumb_path):
+            try: os.unlink(thumb_path)
+            except Exception: pass
+
+
+async def _send_original_video_fallback(bot, chat_id: int, file_id: str, caption: str,
+                                        markup=None, pm="HTML", protect=False):
+    """Watermark qilib bo'lmasa ham qism xato bo'lib qolmasligi uchun original file_id bilan yuboradi."""
+    from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
+    # Fallback bo'lsa ham ogohlantirish va himoya yoqilgan bo'lsin
+    protect = True
+    caption = _with_warn(caption)
+
+    kw = {
+        "chat_id": chat_id,
+        "video": file_id,
+        "caption": caption,
+        "parse_mode": pm,
+        "supports_streaming": True,
+    }
+    if markup: kw["reply_markup"] = markup
+    if protect: kw["protect_content"] = True
+
+    timeout_kw = {
+        "read_timeout": VIDEO_IO_TIMEOUT,
+        "write_timeout": VIDEO_IO_TIMEOUT,
+        "connect_timeout": VIDEO_IO_TIMEOUT,
+        "pool_timeout": VIDEO_IO_TIMEOUT,
+    }
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            return await bot.send_video(**kw, **timeout_kw)
+        except TypeError:
+            return await bot.send_video(**kw)
+        except RetryAfter as e:
+            last_error = e
+            await asyncio.sleep(float(e.retry_after) + 1)
+        except (TimedOut, NetworkError) as e:
+            last_error = e
+            logger.warning(f"original send_video urinish {attempt}/3 xato: {e}")
+            if attempt < 3:
+                await asyncio.sleep(2 * attempt)
+        except (BadRequest, TelegramError) as e:
+            last_error = e
+            logger.warning(f"original send_video xato: {e}")
+            break
+
+    try:
+        doc_kw = {
+            "chat_id": chat_id,
+            "document": file_id,
+            "caption": caption,
+            "parse_mode": pm,
+        }
+        if markup: doc_kw["reply_markup"] = markup
+        if protect: doc_kw["protect_content"] = True
+        return await bot.send_document(**doc_kw, **timeout_kw)
+    except TypeError:
+        return await bot.send_document(**doc_kw)
+    except Exception:
+        raise last_error
+
+
 def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, username: str = "") -> bool:
     """
-    ffmpeg orqali videoga BITTA watermark qo'shadi.
+    ffmpeg orqali videoga majburiy watermark qo'shadi.
     Watermark: "O'g'irlash taqiqlanadi" + foydalanuvchi ID + foydalanuvchi nomi.
     Video o'lchami o'zgarmaydi: scale ishlatilmaydi, faqat drawtext qo'shiladi.
     """
     textfile_path = None
     try:
-        safe_user_id = str(user_id or "")
+        safe_user_id = str(user_id or "").strip() or "Nomaʼlum"
         safe_username = str(username or "").strip().replace("\n", " ").replace("\r", " ")
         safe_username = safe_username[:32]
         if safe_username and not safe_username.startswith("@"):
             safe_username = "@" + safe_username
-        if not safe_username:
-            safe_username = "@username_yoq"
+        if not safe_username or safe_username == "@":
+            # Foydalanuvchi nomi qo'yilmagan bo'lsa — aniq yozib qo'yamiz
+            safe_username = "Username qo'yilmagan"
 
         fd, textfile_path = tempfile.mkstemp(suffix=".txt", prefix="wm_txt_")
         os.close(fd)
@@ -2804,32 +3106,21 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
         font_path = _find_font()
         font_opt = f":fontfile={font_path}" if font_path else ""
 
-        # BITTA yozuv: har 4 soniyada 2.7 soniya ko'rinadi, keyin yo'qoladi.
-        # Har siklda x/y boshqa joyga ko'chadi. Comma ishlatmaslik uchun sin/cos qo'llandi.
-        # x/y video chegarasidan chiqmaydi, scale yo'q — original razmer saqlanadi.
-        x_expr = "(w-text_w)*(0.5+0.45*sin(floor(t/4)*2.17))"
-        y_expr = "(h-text_h)*(0.5+0.42*cos(floor(t/4)*1.73))"
-        enable_expr = "lt(mod(t\\,4)\\,2.7)"
-
-        # Videoni kvadrat (4 burchak teng) qilamiz: original video markazda,
-        # aylanish (gradus) o'zgarmaydi, masshtab o'z holicha qoladi — faqat
-        # qisqa tomoniga qora chegara qo'shiladi.
-        pad_filter = (
-            "pad=w='max(iw\\,ih)':h='max(iw\\,ih)'"
-            ":x='(ow-iw)/2':y='(oh-ih)/2':color=black"
-        )
+        # Yozuv video DAVOMIDA TO'XTAMASDAN ko'rinadi (enable yo'q).
+        # Harakat juda sekin — ko'zga urilmaydi, lekin har xil joyda turadi.
+        x_expr = "(w-text_w)*(0.5+0.42*sin(t*0.25))"
+        y_expr = "(h-text_h)*(0.5+0.40*cos(t*0.21))"
 
         vf_filter = (
-            f"{pad_filter},"
             f"drawtext=textfile={textfile_path}"
             f"{font_opt}"
-            f":fontsize=22"
-            f":fontcolor=white@0.94"
-            f":line_spacing=7"
-            f":box=1:boxcolor=black@0.55:boxborderw=12"
+            f":fontsize=26"
+            f":fontcolor=white@0.96"
+            f":line_spacing=8"
+            f":box=1:boxcolor=black@0.60:boxborderw=14"
+            f":borderw=2:bordercolor=black@0.85"
             f":x='{x_expr}'"
             f":y='{y_expr}'"
-            f":enable='{enable_expr}'"
         )
 
         cmd = [
@@ -2839,10 +3130,12 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
             "-vf", vf_filter,
             "-map", "0:v:0", "-map", "0:a?",
             "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "28",
+            "-preset", "ultrafast",
+            "-crf", "30",
+            "-threads", "2",
             "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
+            "-c:a", "aac",
+            "-b:a", "96k",
             "-movflags", "+faststart",
             output_path,
         ]
@@ -2876,21 +3169,58 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
                 pass
 
 
+# ─── Parallel watermark cheklovi (CPU tiqilmasin) ──────
+_WM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("WM_PARALLEL") or "6"))
+
+# Watermarklangan videolarni cache qilamiz — bir xil (file_id, user_id) qayta ishlanmasin
+_WM_CACHE: dict = {}
+_WM_CACHE_MAX = 2000
+_WM_VERSION = "always_on_slow_v3"
+
+
+
+WARN_PREFIX = "⚠️ <b>O'g'irlash qat'iyan taqiqlanadi!</b>\n\n"
+
+def _with_warn(caption: str) -> str:
+    cap = caption or ""
+    if "O'g'irlash" in cap or "Ogirlash" in cap:
+        return cap
+    return WARN_PREFIX + cap
+
 async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
                          user_id, username: str = "", markup=None, pm="HTML", protect=False):
     """
     Videoni foydalanuvchiga majburiy watermark bilan yuboradi.
-    Watermark chiqmasa original video yuborilmaydi — shunda hamma qismda watermark majburiy bo'ladi.
+    Tez va bir vaqtning o'zida ko'p foydalanuvchi uchun: cache + parallel ffmpeg.
     """
+    # MAJBURIY: har doim protect_content va ogohlantirish caption
+    protect = True
+    caption = _with_warn(caption)
+
+    # Cache: shu (file_id, user_id) avval ishlangan bo'lsa — tayyor file_id bilan yuboramiz (tez!)
+    cache_key = (_WM_VERSION, str(file_id), int(user_id) if user_id else 0)
+    cached_fid = _WM_CACHE.get(cache_key)
+    if cached_fid:
+        try:
+            return await bot.send_video(
+                chat_id=chat_id, video=cached_fid, caption=caption,
+                parse_mode=pm, reply_markup=markup, protect_content=True,
+                supports_streaming=True,
+            )
+        except Exception as ce:
+            logger.warning(f"cache fid ishlamadi, qayta ishlanadi: {ce}")
+            _WM_CACHE.pop(cache_key, None)
+
     if not _check_ffmpeg():
         logger.error("❌ ffmpeg topilmadi — watermark qo'yib bo'lmaydi")
         return await sm(bot, chat_id, "❌ Video tayyorlanmadi. Serverda ffmpeg topilmadi.", pm=pm)
 
     tmp_in = None
     tmp_out = None
+    tmp_small = None
     try:
         async def _do_watermark():
-            nonlocal tmp_in, tmp_out
+            nonlocal tmp_in, tmp_out, tmp_small
             tg_file = await bot.get_file(file_id)
 
             fd_in, tmp_in = tempfile.mkstemp(suffix=".mp4", prefix="wm_in_")
@@ -2898,34 +3228,64 @@ async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
             os.close(fd_in)
             os.close(fd_out)
 
-            await tg_file.download_to_drive(tmp_in)
+            await _download_tg_file_safely(tg_file, tmp_in)
             logger.info(f"Watermark: {file_id[:20]}... yuklab olindi ({os.path.getsize(tmp_in)//1024} KB)")
 
-            success = await asyncio.to_thread(
-                _add_watermark_ffmpeg,
-                tmp_in,
-                tmp_out,
-                str(user_id),
-                str(username or ""),
-            )
+            async with _WM_SEMAPHORE:
+                success = await asyncio.to_thread(
+                    _add_watermark_ffmpeg,
+                    tmp_in,
+                    tmp_out,
+                    str(user_id),
+                    str(username or ""),
+                )
 
             if success and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1000:
-                with open(tmp_out, "rb") as vf:
-                    return await sv(bot, chat_id, vf, caption, markup, pm, protect)
+                send_path, tmp_small = await asyncio.to_thread(_compress_video_to_telegram_limit, tmp_out)
+                msg = await _send_video_file_safely(
+                    bot, chat_id, send_path, caption,
+                    markup=markup, pm=pm, protect=protect,
+                )
+                try:
+                    fid = getattr(getattr(msg, "video", None), "file_id", None) or getattr(getattr(msg, "document", None), "file_id", None)
+                    if fid:
+                        if len(_WM_CACHE) > _WM_CACHE_MAX:
+                            _WM_CACHE.clear()
+                        _WM_CACHE[cache_key] = fid
+                except Exception:
+                    pass
+                return msg
 
-            logger.error("Watermark qo'yilmadi — original video yuborilmaydi")
-            return await sm(bot, chat_id, "❌ Video watermark bilan tayyorlanmadi. Iltimos qayta urinib ko'ring.", pm=pm)
+            logger.error("Watermark qo'yilmadi — original video fallback yuboriladi")
+            return await _send_original_video_fallback(
+                bot, chat_id, file_id, caption,
+                markup=markup, pm=pm, protect=protect,
+            )
 
-        return await asyncio.wait_for(_do_watermark(), timeout=930.0)
+        return await asyncio.wait_for(_do_watermark(), timeout=1200.0)
 
     except asyncio.TimeoutError:
-        logger.error("sv_watermarked: 930s timeout — original video yuborilmaydi")
-        return await sm(bot, chat_id, "❌ Video tayyorlashga ko'p vaqt ketdi. Qayta urinib ko'ring.", pm=pm)
+        logger.error("sv_watermarked: 1200s timeout — original video fallback yuboriladi")
+        try:
+            return await _send_original_video_fallback(
+                bot, chat_id, file_id, caption,
+                markup=markup, pm=pm, protect=protect,
+            )
+        except Exception as fb_e:
+            logger.error(f"original fallback ham xato: {fb_e}")
+            return await sm(bot, chat_id, "❌ Video yuborishda xato. Qayta urinib ko'ring.", pm=pm)
     except Exception as e:
         logger.error(f"sv_watermarked xato: {e}")
-        return await sm(bot, chat_id, "❌ Video yuborishda xato. Qayta urinib ko'ring.", pm=pm)
+        try:
+            return await _send_original_video_fallback(
+                bot, chat_id, file_id, caption,
+                markup=markup, pm=pm, protect=protect,
+            )
+        except Exception as fb_e:
+            logger.error(f"original fallback ham xato: {fb_e}")
+            return await sm(bot, chat_id, "❌ Video yuborishda xato. Qayta urinib ko'ring.", pm=pm)
     finally:
-        for p in [tmp_in, tmp_out]:
+        for p in [tmp_in, tmp_out, tmp_small]:
             if p and os.path.exists(p):
                 try:
                     os.unlink(p)
@@ -5547,14 +5907,15 @@ async def cb_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(pay["ep"]) - 1
         eps = movie.get("episodes", [])
         if 0 <= idx < len(eps):
-            await asyncio.gather(
-                sm(context.bot, pay["user_id"],
-                   "✅ <b>Admin chekingizni tasdiqladi!</b>\n\n"
-                   f"🎬 Mana <b>{pay['ep']}-qism</b> videosini tomosha qiling 👇"),
-                sv(context.bot, pay["user_id"], eps[idx],
-                   f"<b>{movie.get('title')}</b>\nQism: {pay['ep']}",
-                   protect=(bool(RAM.settings.get("content_protect", True)) and not is_super_admin(pay["user_id"]))),
-                return_exceptions=True,
+            await sm(context.bot, pay["user_id"],
+               "✅ <b>Admin chekingizni tasdiqladi!</b>\n\n"
+               f"🎬 Mana <b>{pay['ep']}-qism</b> videosini tomosha qiling 👇")
+            await sv_watermarked(
+                context.bot, pay["user_id"], eps[idx],
+                f"<b>{movie.get('title')}</b>\nQism: {pay['ep']}",
+                user_id=pay["user_id"],
+                username=(user_dict.get("username") or user_dict.get("name") or ""),
+                protect=(bool(RAM.settings.get("content_protect", True)) and not is_super_admin(pay["user_id"]))
             )
             async def update_pay_stats():
                 movie.setdefault("views", {})
@@ -9318,10 +9679,11 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
+        .concurrent_updates(True)
+        .read_timeout(VIDEO_IO_TIMEOUT)
+        .write_timeout(VIDEO_IO_TIMEOUT)
         .connect_timeout(15)
-        .pool_timeout(30)
+        .pool_timeout(60)
         .build()
     )
 
@@ -9329,14 +9691,14 @@ def main():
     global _BOT_APP
     _BOT_APP = app
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler, block=False))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler, block=False))
     app.add_handler(MessageHandler(
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_handler))
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_handler, block=False))
     # So'rovli kanal uchun — join request handler
     from telegram.ext import ChatJoinRequestHandler
-    app.add_handler(ChatJoinRequestHandler(join_request_handler))
+    app.add_handler(ChatJoinRequestHandler(join_request_handler, block=False))
 
     # ── Har 5 daqiqada JSONBlob ga sinxron saqlash ────────
     async def _periodic_sync(context_job):
@@ -9435,10 +9797,10 @@ def main():
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query", "chat_join_request"],
-        read_timeout=30,
-        write_timeout=30,
+        read_timeout=VIDEO_IO_TIMEOUT,
+        write_timeout=VIDEO_IO_TIMEOUT,
         connect_timeout=15,
-        pool_timeout=30,
+        pool_timeout=60,
     )
 
 

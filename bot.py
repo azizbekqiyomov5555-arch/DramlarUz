@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 VIDEO_IO_TIMEOUT = int(os.environ.get("VIDEO_IO_TIMEOUT") or "600")
 TELEGRAM_SAFE_UPLOAD_LIMIT_MB = int(os.environ.get("TELEGRAM_SAFE_UPLOAD_LIMIT_MB") or "48")
 TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES = TELEGRAM_SAFE_UPLOAD_LIMIT_MB * 1024 * 1024
+WM_FFMPEG_TIMEOUT = int(os.environ.get("WM_FFMPEG_TIMEOUT") or "14400")
+WM_TOTAL_TIMEOUT = int(os.environ.get("WM_TOTAL_TIMEOUT") or "21600")
 
 # ─── BOT YARATISH NARXI VA TARIFLAR ─────────────────────────
 BOT_CREATE_PRICE = 150_000        # so'm — birinchi marta bot yaratish
@@ -2887,7 +2889,7 @@ def _compress_video_to_telegram_limit(input_path: str):
                 "-movflags", "+faststart",
                 out_path,
             ]
-            result = subprocess.run(cmd, capture_output=True, timeout=900)
+            result = subprocess.run(cmd, capture_output=True, timeout=WM_FFMPEG_TIMEOUT)
             if result.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 1000:
                 err = result.stderr.decode("utf-8", errors="replace")
                 logger.warning(f"Video siqish urinishi xato: {err[:800]}")
@@ -2912,6 +2914,8 @@ def _compress_video_to_telegram_limit(input_path: str):
         if best_path:
             logger.warning(f"Video siqildi, lekin limitdan katta qolishi mumkin: {best_size // 1024 // 1024}MB")
             return best_path, best_path
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Video siqish: vaqt tugadi ({WM_FFMPEG_TIMEOUT} soniya)")
     except Exception as e:
         logger.warning(f"Video siqishda xato: {e}")
     return input_path, None
@@ -3106,10 +3110,11 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
         font_path = _find_font()
         font_opt = f":fontfile={font_path}" if font_path else ""
 
-        # Yozuv video DAVOMIDA TO'XTAMASDAN ko'rinadi (enable yo'q).
-        # Harakat juda sekin — ko'zga urilmaydi, lekin har xil joyda turadi.
-        x_expr = "(w-text_w)*(0.5+0.42*sin(t*0.25))"
-        y_expr = "(h-text_h)*(0.5+0.40*cos(t*0.21))"
+        # Watermark suzib yurmaydi: har 2 sekundda boshqa joyda paydo bo'ladi,
+        # 1.45 sekund ko'rinib, 0.55 sekund yo'qoladi. Video uzun bo'lsa ham davom etadi.
+        visible_expr = "lt(mod(t\\,2)\\,1.45)"
+        x_expr = "mod(37*floor(t/2)+13\\,100)/100*(w-text_w)"
+        y_expr = "mod(53*floor(t/2)+29\\,100)/100*(h-text_h)"
 
         vf_filter = (
             f"drawtext=textfile={textfile_path}"
@@ -3121,6 +3126,7 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
             f":borderw=2:bordercolor=black@0.85"
             f":x='{x_expr}'"
             f":y='{y_expr}'"
+            f":enable='{visible_expr}'"
         )
 
         cmd = [
@@ -3141,7 +3147,7 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
         ]
 
         logger.info("ffmpeg watermark: boshlandi")
-        result = subprocess.run(cmd, capture_output=True, timeout=900)
+        result = subprocess.run(cmd, capture_output=True, timeout=WM_FFMPEG_TIMEOUT)
 
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")
@@ -3156,7 +3162,7 @@ def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, usern
         return True
 
     except subprocess.TimeoutExpired:
-        logger.error("ffmpeg: vaqt tugadi (15 daqiqa)")
+        logger.error(f"ffmpeg: vaqt tugadi ({WM_FFMPEG_TIMEOUT} soniya)")
         return False
     except Exception as e:
         logger.error(f"ffmpeg istisno: {e}")
@@ -3175,7 +3181,7 @@ _WM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("WM_PARALLEL") or "6"))
 # Watermarklangan videolarni cache qilamiz — bir xil (file_id, user_id) qayta ishlanmasin
 _WM_CACHE: dict = {}
 _WM_CACHE_MAX = 2000
-_WM_VERSION = "always_on_slow_v3"
+_WM_VERSION = "popup_every_2s_all_v4"
 
 
 
@@ -3262,10 +3268,10 @@ async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
                 markup=markup, pm=pm, protect=protect,
             )
 
-        return await asyncio.wait_for(_do_watermark(), timeout=1200.0)
+        return await asyncio.wait_for(_do_watermark(), timeout=WM_TOTAL_TIMEOUT)
 
     except asyncio.TimeoutError:
-        logger.error("sv_watermarked: 1200s timeout — original video fallback yuboriladi")
+        logger.error(f"sv_watermarked: {WM_TOTAL_TIMEOUT}s timeout — original video fallback yuboriladi")
         try:
             return await _send_original_video_fallback(
                 bot, chat_id, file_id, caption,

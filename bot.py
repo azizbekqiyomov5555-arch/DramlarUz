@@ -52,63 +52,6 @@ LOCAL_MOVIES_FILE = "movies_backup.json"
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Katta videolarda Telegram upload/download 30 soniyada uzilib qolmasligi uchun.
-VIDEO_IO_TIMEOUT = int(os.environ.get("VIDEO_IO_TIMEOUT") or "600")
-TELEGRAM_SAFE_UPLOAD_LIMIT_MB = int(os.environ.get("TELEGRAM_SAFE_UPLOAD_LIMIT_MB") or "48")
-TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES = TELEGRAM_SAFE_UPLOAD_LIMIT_MB * 1024 * 1024
-WM_INLINE_MAX_MB = int(os.environ.get("WM_INLINE_MAX_MB") or "47")
-WM_INLINE_MAX_BYTES = WM_INLINE_MAX_MB * 1024 * 1024
-WM_FFMPEG_TIMEOUT = int(os.environ.get("WM_FFMPEG_TIMEOUT") or "14400")
-WM_TOTAL_TIMEOUT = int(os.environ.get("WM_TOTAL_TIMEOUT") or "21600")
-
-# ─── BOT YARATISH NARXI VA TARIFLAR ─────────────────────────
-BOT_CREATE_PRICE = 150_000        # so'm — birinchi marta bot yaratish
-BOT_TRIAL_DAYS   = 30             # sotib olgandan so'ng tekin kunlar
-_DEFAULT_EXTEND_TARIFFS = [
-    {"days": 30,  "price": 100_000, "label": "1 oy"},
-    {"days": 90,  "price": 270_000, "label": "3 oy"},
-    {"days": 180, "price": 500_000, "label": "6 oy"},
-    {"days": 365, "price": 900_000, "label": "1 yil"},
-]
-FACTORY_TARIFFS_FILE = "factory_tariffs.json"
-
-def load_extend_tariffs() -> list[dict]:
-    try:
-        if os.path.exists(FACTORY_TARIFFS_FILE):
-            with open(FACTORY_TARIFFS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list) and data:
-                out = []
-                for t in data:
-                    try:
-                        out.append({
-                            "days":  int(t["days"]),
-                            "price": int(t["price"]),
-                            "label": str(t.get("label") or f"{int(t['days'])} kun"),
-                        })
-                    except Exception:
-                        continue
-                if out:
-                    return out
-    except Exception as e:
-        logger.error(f"load_extend_tariffs: {e}")
-    return [dict(t) for t in _DEFAULT_EXTEND_TARIFFS]
-
-def save_extend_tariffs(tariffs: list[dict]) -> bool:
-    try:
-        with open(FACTORY_TARIFFS_FILE, "w", encoding="utf-8") as f:
-            json.dump(tariffs, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        logger.error(f"save_extend_tariffs: {e}")
-        return False
-
-BOT_EXTEND_TARIFFS = load_extend_tariffs()
-# Bot yaratish uchun pul to'lab, token kutayotgan foydalanuvchilar
-FACTORY_PAID_TO_CREATE: set[int] = set()
-
-
-
 
 # ══════════════════════════════════════════════════════════
 # 🏭 FACTORY — foydalanuvchilar o'z botlarini yaratadi
@@ -120,8 +63,7 @@ import signal     as _fx_signal
 import threading  as _fx_threading
 import sys        as _fx_sys
 from urllib.parse import urlparse as _fx_urlparse, urlunparse as _fx_urlunparse, \
-                         parse_qsl as _fx_parse_qsl, urlencode as _fx_urlencode, \
-                         quote as _fx_quote
+                         parse_qsl as _fx_parse_qsl, urlencode as _fx_urlencode
 
 LOVABLE_ROLE = os.environ.get("LOVABLE_ROLE", "").strip().lower()
 IS_CHILD_BOT = (LOVABLE_ROLE == "child")
@@ -143,7 +85,7 @@ def factory_empty_db() -> dict:
         "users": {},
         "channels": [],
         "simple_links": [],
-        "card_number": "5614681872672690",
+        "card_number": "",
         "pending_payments": {},
         "settings": {
             "install_file_id": None,
@@ -164,32 +106,8 @@ def factory_empty_db() -> dict:
         "payment_methods": {"auto": [], "manual": []},
     }
 
-def _pg_connect(url: str):
-    """
-    PostgreSQL ulanish hosil qiladi — Railway internal/external hostlarga mos sslmode bilan.
-    Railway'ning ichki tarmoq hosti (*.railway.internal) SSL'ni qo'llamaydi,
-    shu sababli sslmode='require' bilan ulanish doim FAIL bo'ladi.
-    Tashqi hostlar uchun esa SSL talab qilinadi.
-    """
-    host = ""
-    try:
-        host = (_fx_urlparse(url).hostname or "").lower()
-    except Exception:
-        pass
-    if host.endswith(".railway.internal") or host in ("localhost", "127.0.0.1"):
-        try:
-            return psycopg2.connect(url, sslmode="disable")
-        except Exception:
-            return psycopg2.connect(url)
-    try:
-        return psycopg2.connect(url, sslmode="require")
-    except Exception:
-        # SSL talab qilib bo'lmasa — sslmode'siz qayta urinib ko'ramiz
-        return psycopg2.connect(url)
-
-
 def _factory_db():
-    return _pg_connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def factory_init_db():
     """factory.child_bots jadvalini tayyorlaydi (faqat parent ishlatadi)."""
@@ -220,8 +138,6 @@ def factory_init_db():
                 ALTER TABLE factory.child_bots ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
                 ALTER TABLE factory.child_bots ADD COLUMN IF NOT EXISTS last_started TIMESTAMPTZ;
                 ALTER TABLE factory.child_bots ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
-                ALTER TABLE factory.child_bots ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
-                ALTER TABLE factory.child_bots ADD COLUMN IF NOT EXISTS paid_total BIGINT NOT NULL DEFAULT 0;
             """)
         logger.info("✅ Factory jadvali tayyor")
         return True
@@ -229,15 +145,14 @@ def factory_init_db():
         logger.error(f"Factory init xato: {e}")
         return False
 
-def factory_db_insert(owner_id, owner_name, owner_username, token, uname, title,
-                      paid_amount: int = 0, trial_days: int = BOT_TRIAL_DAYS):
+def factory_db_insert(owner_id, owner_name, owner_username, token, uname, title):
     with _factory_db() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO factory.child_bots(owner_id,owner_name,owner_username,"
-            "token,bot_username,bot_title,schema_name,expires_at,paid_total) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s, NOW() + (%s || ' days')::interval, %s) RETURNING id",
+            "token,bot_username,bot_title,schema_name) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (owner_id, owner_name or "", owner_username or "", token,
-             uname or "", title or "", "_tmp_", str(int(trial_days)), int(paid_amount)))
+             uname or "", title or "", "_tmp_"))
         bid = cur.fetchone()[0]
         schema = f"bot_{bid}"
         cur.execute("UPDATE factory.child_bots SET schema_name=%s WHERE id=%s", (schema, bid))
@@ -256,42 +171,6 @@ def factory_db_insert(owner_id, owner_name, owner_username, token, uname, title,
                 SET value = EXCLUDED.value, updated_at = NOW()''',
             (json.dumps(factory_empty_db(), ensure_ascii=False),))
     return bid, schema
-
-
-def factory_db_extend(bid: int, days: int, paid_amount: int = 0):
-    """Bot muddatini uzaytiradi. Agar bot allaqachon muddati o'tgan bo'lsa —
-    NOW() dan boshlab; aks holda mavjud expires_at ga qo'shadi."""
-    with _factory_db() as conn, conn.cursor() as cur:
-        cur.execute("""
-            UPDATE factory.child_bots
-               SET expires_at = CASE
-                       WHEN expires_at IS NULL OR expires_at < NOW()
-                           THEN NOW() + (%s || ' days')::interval
-                       ELSE expires_at + (%s || ' days')::interval
-                   END,
-                   paid_total = COALESCE(paid_total, 0) + %s,
-                   status = CASE WHEN status = 'expired' THEN 'active' ELSE status END
-             WHERE id = %s
-         RETURNING expires_at
-        """, (str(int(days)), str(int(days)), int(paid_amount), bid))
-        row = cur.fetchone()
-        return row[0] if row else None
-
-
-def factory_is_expired(row: dict) -> bool:
-    exp = row.get("expires_at") if row else None
-    if not exp:
-        return False
-    try:
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=_tz.utc)
-        return exp < now
-    except Exception:
-        return False
-
-
 
 def factory_db_active():
     with _factory_db() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -320,32 +199,16 @@ def factory_db_set_status(bid, st):
             (st, st, bid))
 
 def factory_db_delete(bid: int) -> bool:
-    """Bola-botni TO'LIQ o'chiradi: jarayonni to'xtatadi, uning schema/ma'lumotlarini
-    o'chiradi va factory.child_bots jadvalidan yozuvni (token bilan birga) butunlay olib tashlaydi."""
     row = factory_db_get(bid)
     if not row:
         return False
     schema = row.get("schema_name") or ""
-
-    # 1) Jarayonni to'xtatamiz (token bilan ishlayotgan bola-bot endi ishlamasligi kerak)
     factory_stop(bid)
-
-    # 2) Schema (bola-botning butun ma'lumotlar bazasi) — alohida urinish,
-    #    bu muvaffaqiyatsiz bo'lsa ham asosiy yozuvni o'chirishga to'sqinlik qilmasin.
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema) and schema != "factory":
-        try:
-            with _factory_db() as conn, conn.cursor() as cur:
-                cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        except Exception as e:
-            logger.error(f"factory_db_delete: schema #{bid} ({schema}) o'chmadi: {e}")
-
-    # 3) Asosiy yozuv — token shu yerda saqlanadi, shuning uchun bu qator
-    #    o'chirilganda bot token bilan birga butunlay bazadan o'chadi.
     with _factory_db() as conn, conn.cursor() as cur:
+        if re.fullmatch(r"bot_\d+", schema):
+            cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         cur.execute("DELETE FROM factory.child_bots WHERE id=%s", (bid,))
-        deleted = cur.rowcount > 0
-
-    return deleted
+    return True
 
 def factory_db_started(bid):
     with _factory_db() as conn, conn.cursor() as cur:
@@ -359,18 +222,11 @@ def factory_validate_token(t: str):
         return None
 
 def _factory_child_db_url(schema: str) -> str:
-    """DATABASE_URL ga search_path=schema qo'shadi — bola-bot izolyatsiyasi.
-
-    MUHIM: urlencode() standart holatda bo'shliqni '+' bilan kodlaydi, lekin
-    libpq URI ichidagi '+' belgisini bo'shliqqa AYLANTIRMAYDI — natijada
-    'options=-c+search_path=schema' yaroqsiz bo'lib, butun ulanish
-    ('Ulanish yo'q') bilan ishlamay qoladi. Shu sababli bo'shliq %20
-    ko'rinishida kodlanishi uchun quote_via=quote ishlatiladi.
-    """
+    """DATABASE_URL ga search_path=schema qo'shadi — bola-bot izolyatsiyasi."""
     u = _fx_urlparse(DATABASE_URL)
     q = dict(_fx_parse_qsl(u.query))
     q["options"] = f"-c search_path={schema}"
-    return _fx_urlunparse(u._replace(query=_fx_urlencode(q, quote_via=_fx_quote)))
+    return _fx_urlunparse(u._replace(query=_fx_urlencode(q)))
 
 def factory_spawn(row: dict) -> bool:
     """Bola-botni subprocess sifatida ishga tushuradi."""
@@ -413,34 +269,15 @@ def factory_stop(bid: int):
         else:
             os.killpg(os.getpgid(p.pid), _fx_signal.SIGTERM)
         p.wait(timeout=5)
-    except _fx_subprocess.TimeoutExpired:
-        # SIGTERM yetarli bo'lmadi — majburiy o'chiramiz
-        try:
-            if os.name == "nt":
-                p.kill()
-            else:
-                os.killpg(os.getpgid(p.pid), _fx_signal.SIGKILL)
-            p.wait(timeout=5)
-        except Exception:
-            pass
     except Exception:
         pass
 
 def factory_watchdog():
-    """O'lib qolgan bola-botlarni qayta tushuradi va muddati o'tganlarini to'xtatadi."""
+    """O'lib qolgan bola-botlarni qayta tushuradi."""
     while True:
         try:
             for row in factory_db_active():
                 bid = row["id"]
-                # Muddati o'tgan bo'lsa — to'xtatib, 'expired' belgilaymiz
-                if factory_is_expired(row):
-                    try:
-                        factory_stop(bid)
-                        factory_db_set_status(bid, "expired")
-                        logger.warning(f"⏰ Factory #{bid} muddati o'tdi — to'xtatildi")
-                    except Exception as ee:
-                        logger.error(f"factory_watchdog expire #{bid}: {ee}")
-                    continue
                 p = FACTORY_RUNNING.get(bid)
                 if p is None or p.poll() is not None:
                     logger.warning(f"♻️ Factory #{bid} qayta tushiramiz")
@@ -448,7 +285,6 @@ def factory_watchdog():
         except Exception as e:
             logger.error(f"factory_watchdog: {e}")
         time.sleep(20)
-
 
 def factory_boot_all():
     """Parent ishga tushganda — barcha aktiv bolalarni tiklash + watchdog."""
@@ -473,52 +309,30 @@ def factory_bot_admin_kb(rows_data: list[dict]):
         status = str(b.get("status") or "active")
         uname = b.get("bot_username") or f"ID {bid}"
         if status == "active":
-            rows.append([ibtn(f"⏸ @{uname}", data=f"factory_admin_stop:{bid}", style="danger")])
+            rows.append([ibtn(f"⏹ @{uname} ni to'xtatish", data=f"factory_admin_stop:{bid}", style="danger")])
         elif status != "deleted":
-            rows.append([ibtn(f"▶️ @{uname}", data=f"factory_admin_start:{bid}", style="success")])
+            rows.append([ibtn(f"▶️ @{uname} ni yoqish", data=f"factory_admin_start:{bid}", style="success")])
         rows.append([ibtn(f"🗑 @{uname} ni o'chirish", data=f"factory_admin_del:{bid}", style="danger")])
-    rows.append([
-        ibtn("💰 Tariflar", data="factory_tariffs_admin", style="success"),
-        ibtn("🔄 Yangilash", data="factory_admin_list",   style="primary"),
-    ])
+    rows.append([ibtn("🔄 Yangilash", data="factory_admin_list", style="primary")])
     rows.append([ibtn("⬅️ Admin panel", data="go_admin_panel", style="success")])
     return ikb(rows)
 
 def factory_bots_admin_text(rows_data: list[dict]) -> str:
-    total   = len(rows_data)
-    active  = sum(1 for b in rows_data if (b.get("status") or "") == "active")
-    stopped = sum(1 for b in rows_data if (b.get("status") or "") == "stopped")
-    expired = sum(1 for b in rows_data if (b.get("status") or "") == "expired")
-    deleted = sum(1 for b in rows_data if (b.get("status") or "") == "deleted")
-    header = (
-        "🤖 <b>Botlarni boshqarish</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Jami: <b>{total}</b>   🟢 Aktiv: <b>{active}</b>\n"
-        f"🔴 To'xtatilgan: <b>{stopped}</b>   ⏳ Muddati o'tgan: <b>{expired}</b>   🗑 O'chirilgan: <b>{deleted}</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-    )
     if not rows_data:
-        return header + "\n📭 Hali bola-bot yaratilmagan."
-    lines = [header]
+        return "🤖 <b>Botlarni boshqarish</b>\n\n📭 Hali bola-bot yaratilmagan."
+    lines = ["🤖 <b>Botlarni boshqarish</b>\n"]
     for b in rows_data[:30]:
         status = str(b.get("status") or "active")
-        icon = {"active":"🟢","stopped":"🔴","expired":"⏳","deleted":"🗑"}.get(status, "⚪️")
+        icon = "🟢" if status == "active" else ("🗑" if status == "deleted" else "🔴")
         owner = html.escape(str(b.get("owner_name") or ""))
         owner_username = b.get("owner_username") or ""
         owner_txt = f"@{html.escape(owner_username)}" if owner_username else f"<code>{b.get('owner_id')}</code>"
         uname = html.escape(str(b.get("bot_username") or "?"))
-        exp = b.get("expires_at")
-        try:
-            exp_txt = exp.strftime("%Y-%m-%d %H:%M") if exp else "—"
-        except Exception:
-            exp_txt = str(exp or "—")
-        paid = int(b.get("paid_total") or 0)
         lines.append(
-            f"{icon} <b>@{uname}</b>  ·  <code>{status}</code>\n"
-            f"   🆔 <code>{b.get('id')}</code>  |  👤 {owner or '—'} {owner_txt}\n"
-            f"   ⏳ <code>{exp_txt}</code>  |  💰 <b>{paid:,}</b> so'm".replace(",", " ")
+            f"{icon} <b>@{uname}</b> — <code>{status}</code>\n"
+            f"   ID: <code>{b.get('id')}</code> | Egasi: {owner or '—'} {owner_txt}"
         )
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 async def factory_send_admin_list(bot, uid, q=None):
     try:
@@ -528,45 +342,6 @@ async def factory_send_admin_list(bot, uid, q=None):
         return
     txt = factory_bots_admin_text(rows_data)
     kb = factory_bot_admin_kb(rows_data)
-    if q is not None:
-        try:
-            await q.edit_message_text(txt, parse_mode="HTML", reply_markup=kb)
-            return
-        except Exception:
-            pass
-    await sm(bot, uid, txt, kb)
-
-
-def factory_tariffs_admin_text() -> str:
-    lines = [
-        "💰 <b>Bot muddatini uzaytirish — Tariflar</b>",
-        "━━━━━━━━━━━━━━━━━━━━",
-    ]
-    if not BOT_EXTEND_TARIFFS:
-        lines.append("\n📭 Tariflar ro'yxati bo'sh. Yangi tarif qo'shing.")
-    else:
-        for i, t in enumerate(BOT_EXTEND_TARIFFS, 1):
-            lines.append(
-                f"\n<b>{i}.</b> 📅 <b>{html.escape(str(t['label']))}</b>\n"
-                f"   ⏱ <code>{int(t['days'])}</code> kun  ·  💵 <b>{int(t['price']):,}</b> so'm".replace(",", " ")
-            )
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    return "\n".join(lines)
-
-def factory_tariffs_admin_kb() -> dict:
-    rows = []
-    for i, t in enumerate(BOT_EXTEND_TARIFFS):
-        rows.append([
-            ibtn(f"✏️ {t['label']}",  data=f"factory_tariff_edit:{i}", style="primary"),
-            ibtn("🗑",                 data=f"factory_tariff_del:{i}",  style="danger"),
-        ])
-    rows.append([ibtn("➕ Yangi tarif qo'shish", data="factory_tariff_add", style="success")])
-    rows.append([ibtn("⬅️ Orqaga", data="factory_admin_list", style="primary")])
-    return ikb(rows)
-
-async def factory_send_tariffs_admin(bot, uid, q=None):
-    txt = factory_tariffs_admin_text()
-    kb  = factory_tariffs_admin_kb()
     if q is not None:
         try:
             await q.edit_message_text(txt, parse_mode="HTML", reply_markup=kb)
@@ -589,7 +364,7 @@ class RamCache:
         self.movies: dict   = {}   # {code: movie_dict}
         self.users: dict    = {}   # {uid_str: user_dict}
         self.channels: list = []
-        self.card_number: str = "5614681872672690"
+        self.card_number: str = ""
         self.pending_payments: dict = {}
         self.simple_links: list = []   # Tekshirilmaydigan oddiy havolalar
         self.settings: dict = {
@@ -643,7 +418,7 @@ class RamCache:
             self.users            = data.get("users", {}) or {}
             self.channels         = data.get("channels", []) or []
             self.simple_links     = data.get("simple_links", []) or []
-            self.card_number      = "5614681872672690"
+            self.card_number      = data.get("card_number", "") or ""
             self.pending_payments = data.get("pending_payments", {}) or {}
             self.settings         = data.get("settings", {}) or {}
             # Eski bazalarda yo'q kalitlarni qo'shamiz
@@ -901,7 +676,7 @@ def episode_expires_in(user_id, code, ep) -> int:
 # ── Admin huquqlari ─────────────────────────────────────────
 ADMIN_PERM_KEYS = [
     "kino_joy", "qism_qosh", "pullik", "stat", "kanal_post",
-    "maj_kanal", "emoji_soz", "kino_kanal_set",
+    "maj_kanal", "karta", "emoji_soz", "kino_kanal_set",
     "qism_tahrir", "kino_uch", "broadcast",
     "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
     "kontent_saqla",
@@ -1095,7 +870,6 @@ DB_STATUS = {
     "fail_count": 0,
     "last_save_ok": None,
     "last_err": None,
-    "last_err_detail": None,  # PostgreSQL xatosi matni — adminga ko'rsatish uchun
     "ram_only": False,
     "pending_save": False,   # saqlanish navbatda?
     "load_failed": False,    # JSONBlob yuklanmadi (faqat log uchun, saqlashni bloklamaydi)
@@ -1195,8 +969,7 @@ DEFAULT_BTN = {
     "topup_manual":       _B("Chet eldan to'lov"),
     "premium_plan_manage": _B("💎 Pryum tariflar"),
     "referral_narxi":     _B("Referral narxi"),
-    "dost_taklif":        _B("Hamkorlik Va Pul ishlash"),
-    "dost_taklif_child":  _B("Do'st taklif qilish"),
+    "dost_taklif":        _B("Do'st taklif qilish"),
     "top_referrers":      _B("🏆 Referral yiqanlar"),
     "factory_bots":       _B("🤖 Botlarni boshqarish"),
     "post_nomi":          "🎭",
@@ -1275,8 +1048,7 @@ BTN_LABELS["hisob_toldirish"] = "Hisobni to\'ldirish tugmasi"
 BTN_LABELS["kanal_btn"]    = "Kanal tugmasi"
 BTN_LABELS["premium_plan_manage"] = "Pryum tariflar boshqaruvi"
 BTN_LABELS["referral_narxi"]     = "Referral narxi"
-BTN_LABELS["dost_taklif"]      = "Hamkorlik Va Pul ishlash"
-BTN_LABELS["dost_taklif_child"]= "Do'st taklif qilish"
+BTN_LABELS["dost_taklif"]      = "Do'st taklif qilish"
 BTN_LABELS["top_referrers"]    = "🏆 Referral yiqanlar"
 BTN_LABELS["kontent_saqla"]   = "Kontentdan saqlash"
 BTN_LABELS["tolov_usul"]      = "To'lov usullari qo'shish"
@@ -1369,7 +1141,7 @@ def _get_pg_conn():
     if not DATABASE_URL:
         return None
     try:
-        conn = _pg_connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
         return conn
     except Exception as e:
         logger.error(f"PostgreSQL ulanish xato: {e}")
@@ -1427,7 +1199,6 @@ def _save_postgres(data: dict, retries: int = 3) -> bool:
             return True
         except Exception as e:
             logger.error(f"PostgreSQL save #{attempt+1} xato: {e}")
-            DB_STATUS["last_err_detail"] = str(e)
             if conn:
                 try: conn.close()
                 except: pass
@@ -1467,7 +1238,6 @@ def _load_postgres() -> dict | None:
                 return {}
         except Exception as e:
             logger.error(f"PostgreSQL load #{attempt+1} xato: {e}")
-            DB_STATUS["last_err_detail"] = str(e)
             if conn:
                 try: conn.close()
                 except: pass
@@ -2190,10 +1960,9 @@ def main_menu_kb(is_admin=False):
     ], [
         rbtn(bt("barcha_kino"), style="primary", emoji_id=get_eid("barcha_kino")),
         rbtn(bt("balans"),      style="success", emoji_id=get_eid("balans")),
+    ], [
+        rbtn(bt("dost_taklif"), style="primary", emoji_id=get_eid("dost_taklif")),
     ]]
-    # Asosiy botda "Hamkorlik Va Pul ishlash", bola botda "Do'st taklif qilish"
-    label = bt("dost_taklif_child") if IS_CHILD_BOT else bt("dost_taklif")
-    rows.append([rbtn(label, style="primary", emoji_id=get_eid("dost_taklif"))])
     if is_admin:
         rows.append([rbtn(bt("boshqarish"), style="danger", emoji_id=get_eid("boshqarish"))])
     return rkb(rows)
@@ -2207,6 +1976,7 @@ def admin_menu_kb(uid=None):
         ("stat",           "primary"),
         ("kanal_post",     "primary"),
         ("maj_kanal",      "danger"),
+        ("karta",          "success"),
         ("ilova",          "primary"),
         ("kino_kanal_set", "success"),
         ("emoji_soz",      "primary"),
@@ -2223,10 +1993,7 @@ def admin_menu_kb(uid=None):
         ("kontent_saqla",  "danger"),
         ("tolov_usul",     "success"),
     ]
-    # "Kontentdan saqlash" tugmasi bola-botda ko'rinmaydi (funksiyasi qoladi)
-    if IS_CHILD_BOT:
-        pairs = [(k, st) for (k, st) in pairs if k != "kontent_saqla"]
-    if is_super_admin(uid) and not IS_CHILD_BOT:
+    if is_super_admin(uid):
         pairs.append(("factory_bots", "danger"))
     if uid is not None and not is_super_admin(uid):
         pairs = [(k, st) for (k, st) in pairs if has_perm(uid, k)]
@@ -2599,54 +2366,10 @@ def topup_admin_kb(pid: str, user_id, username: str = ""):
 def help_kb():
     return ikb([[ibtn(bt("bosh"), data="go_home", style="success", emoji_id=get_eid("bosh"))]])
 
-# Emoji sozlamalari menyusida ko'rinmasligi kerak bo'lgan tugmalar
-# (botda yo'q, eskirgan yoki kontekstga mos kelmaydigan kalitlar)
-EMOJI_MENU_HIDDEN_KEYS = {
-    "karta",            # Karta raqami — olib tashlangan
-    "ilova",            # 'install' bilan dublikat
-    "tiklash",          # menyu boshqaruv tugmasi
-    "yopish",           # menyu boshqaruv tugmasi
-    "default_q",        # menyu boshqaruv tugmasi
-    "orqaga",           # menyu boshqaruv tugmasi
-    "admin_panel",      # orqaga tugmasi
-    "kut",              # vaqtinchalik holat tugmasi
-    "bosh",             # inline bosh menyu
-    "bekor",            # universal bekor
-    "tasdiq",           # universal tasdiq
-    "tekshir",          # obuna tekshirish — inline
-    "javob",            # admin inline
-    "yangi",            # inline yangilash
-    "kod_btn",          # inline kod
-    "kanal_btn",        # inline kanal
-    "ulash",            # inline ulash
-    "qism_add",         # inline qism qo'shish (dublikat)
-    "narx_bel",         # inline narx belgilash
-    "chek_yub",         # inline chek
-    "karta_nusxa",      # inline nusxalash
-    "miqdor_nusxa",     # inline nusxalash
-    "kanal_qosh",       # inline kanal qo'shish
-    "kanal_uch",        # inline kanal o'chirish
-    "kanal_royxat",     # inline ro'yxat
-    "oddiy_havola",     # inline havola
-    "soruvli_kanal",    # inline so'rovli kanal
-    "prev_qism",        # inline navigatsiya
-    "next_qism",        # inline navigatsiya
-    "tomosha",          # inline tomosha
-    "hisob_toldirish",  # inline tugma
-}
-
 def emoji_menu_kb():
     _sync_payment_btn_labels()
     rows = []
-    # Bot turiga qarab qo'shimcha yashiriladiganlar
-    hidden = set(EMOJI_MENU_HIDDEN_KEYS)
-    if IS_CHILD_BOT:
-        # Asosiy botgagina tegishli tugmalar bola botda chiqmasin
-        hidden.update({"dost_taklif", "factory_bots", "kontent_saqla", "tolov_usul"})
-    else:
-        # Bola botning tugmasi asosiyda chiqmasin
-        hidden.add("dost_taklif_child")
-    keys = [k for k in BTN_LABELS.keys() if k not in hidden]
+    keys = list(BTN_LABELS.keys())
     for i in range(0, len(keys), 2):
         row = []
         for key in keys[i:i+2]:
@@ -2785,535 +2508,210 @@ def _find_font() -> str:
     return ""
 
 
-def _probe_video_info(path: str):
-    """ffprobe orqali video width/height/duration ni o'qiydi. Telegram native ko'rinishi uchun kerak."""
-    try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error",
-             "-select_streams", "v:0",
-             "-show_entries", "stream=width,height:format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=0",
-             path],
-            capture_output=True, timeout=15, text=True,
-        )
-        w = h = 0
-        d = 0
-        for line in r.stdout.splitlines():
-            if line.startswith("width="):
-                try: w = int(line.split("=", 1)[1])
-                except: pass
-            elif line.startswith("height="):
-                try: h = int(line.split("=", 1)[1])
-                except: pass
-            elif line.startswith("duration="):
-                try: d = int(float(line.split("=", 1)[1]))
-                except: pass
-        return w, h, d
-    except Exception as e:
-        logger.warning(f"ffprobe xato: {e}")
-        return 0, 0, 0
-
-
-def _make_video_thumb(video_path: str):
-    """Video uchun 1-soniyadan thumbnail yaratadi (Telegram preview uchun)."""
-    try:
-        fd, thumb_path = tempfile.mkstemp(suffix=".jpg", prefix="wm_thumb_")
-        os.close(fd)
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-ss", "1", "-i", video_path,
-             "-frames:v", "1",
-             "-vf", "scale='min(320,iw)':-2",
-             "-q:v", "5",
-             thumb_path],
-            capture_output=True, timeout=20,
-        )
-        if r.returncode == 0 and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 100:
-            return thumb_path
-        try: os.unlink(thumb_path)
-        except Exception: pass
-        return None
-    except Exception as e:
-        logger.warning(f"thumb yaratishda xato: {e}")
-        return None
-
-
-async def _download_tg_file_safely(tg_file, target_path: str):
-    """Telegram'dan katta fayllarni ham timeout bermasdan yuklab olishga urinadi."""
-    try:
-        return await tg_file.download_to_drive(
-            target_path,
-            read_timeout=VIDEO_IO_TIMEOUT,
-            write_timeout=VIDEO_IO_TIMEOUT,
-            connect_timeout=VIDEO_IO_TIMEOUT,
-            pool_timeout=VIDEO_IO_TIMEOUT,
-        )
-    except TypeError:
-        return await tg_file.download_to_drive(target_path)
-
-
-def _compress_video_to_telegram_limit(input_path: str):
+def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str) -> bool:
     """
-    Telegram native video qilib yuborish uchun fayl juda katta bo'lsa siqadi,
-    lekin video resolution/aspect ratio o'zgarmaydi. Ya'ni original video o'lchami saqlanadi.
-    """
-    tmp_paths = []
-    try:
-        original_size = os.path.getsize(input_path)
-        if original_size <= TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES:
-            return input_path, None
-
-        width, height, duration = _probe_video_info(input_path)
-        duration = max(int(duration or 0), 1)
-        logger.warning(
-            f"Video {original_size // 1024 // 1024}MB — Telegram video rejimi uchun "
-            f"siqiladi, resolution saqlanadi ({width}x{height}, {duration}s)"
-        )
-
-        def _encode_to_limit(mult: float):
-            fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="wm_fit_")
-            os.close(fd)
-            tmp_paths.append(tmp_path)
-
-            target_bits = int(TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES * 8 * 0.90 * mult)
-            total_bitrate = max(260_000, target_bits // duration)
-            audio_bitrate = 96_000 if total_bitrate > 520_000 else 64_000
-            video_bitrate = max(180_000, total_bitrate - audio_bitrate)
-
-            cmd = [
-                "ffmpeg", "-y",
-                "-hide_banner", "-loglevel", "error",
-                "-i", input_path,
-                "-map", "0:v:0", "-map", "0:a?",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-b:v", str(video_bitrate),
-                "-maxrate", str(int(video_bitrate * 1.12)),
-                "-bufsize", str(int(video_bitrate * 2)),
-                "-pix_fmt", "yuv420p",
-                "-map_metadata", "0",
-                "-c:a", "aac",
-                "-b:a", str(audio_bitrate),
-                "-movflags", "+faststart",
-                tmp_path,
-            ]
-            result = subprocess.run(cmd, capture_output=True, timeout=WM_FFMPEG_TIMEOUT)
-            if result.returncode != 0:
-                err = result.stderr.decode("utf-8", errors="replace")
-                logger.warning(f"Video limitga siqish xato: {err[:800]}")
-                return None
-            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) <= 1000:
-                return None
-            return tmp_path
-
-        for mult in (1.0, 0.78, 0.58):
-            candidate = _encode_to_limit(mult)
-            if candidate and os.path.getsize(candidate) <= TELEGRAM_SAFE_UPLOAD_LIMIT_BYTES:
-                for p in list(tmp_paths):
-                    if p != candidate and os.path.exists(p):
-                        try: os.unlink(p)
-                        except Exception: pass
-                logger.info(f"Video native rejimga tayyor: {os.path.getsize(candidate)//1024//1024}MB")
-                return candidate, candidate
-
-        logger.warning("Video limitga sig'madi — original fayl bilan send_video uriniladi")
-        for p in tmp_paths:
-            if os.path.exists(p):
-                try: os.unlink(p)
-                except Exception: pass
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Video siqish: vaqt tugadi ({WM_FFMPEG_TIMEOUT} soniya)")
-    except Exception as e:
-        logger.warning(f"Video siqishda xato: {e}")
-    return input_path, None
-
-
-async def _send_video_file_safely(bot, chat_id: int, video_path: str, caption: str,
-                                  markup=None, pm="HTML", protect=False):
-    """Tayyor videoni Telegram'ga timeoutlarni uzaytirib, bir nechta fallback bilan yuboradi."""
-    from telegram import InputFile
-    from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
-
-    width, height, duration = _probe_video_info(video_path)
-    thumb_path = _make_video_thumb(video_path)
-    base_kw = {
-        "chat_id": chat_id,
-        "caption": caption,
-        "parse_mode": pm,
-        "supports_streaming": True,
-    }
-    if markup: base_kw["reply_markup"] = markup
-    if protect: base_kw["protect_content"] = True
-    if width and height:
-        base_kw["width"] = width
-        base_kw["height"] = height
-    if duration:
-        base_kw["duration"] = duration
-
-    def _timeout_kw():
-        return {
-            "read_timeout": VIDEO_IO_TIMEOUT,
-            "write_timeout": VIDEO_IO_TIMEOUT,
-            "connect_timeout": VIDEO_IO_TIMEOUT,
-            "pool_timeout": VIDEO_IO_TIMEOUT,
-        }
-
-    async def _try_send_video(use_thumb: bool, use_meta: bool):
-        kw = dict(base_kw)
-        if not use_meta:
-            kw.pop("width", None)
-            kw.pop("height", None)
-            kw.pop("duration", None)
-        kw.update(_timeout_kw())
-        with open(video_path, "rb") as vf:
-            kw["video"] = InputFile(vf, filename="video.mp4")
-            if use_thumb and thumb_path and os.path.exists(thumb_path):
-                with open(thumb_path, "rb") as th:
-                    kw["thumbnail"] = InputFile(th, filename="thumb.jpg")
-                    return await bot.send_video(**kw)
-            return await bot.send_video(**kw)
-
-    async def _try_send_document():
-        kw = {
-            "chat_id": chat_id,
-            "caption": caption,
-            "parse_mode": pm,
-        }
-        if markup: kw["reply_markup"] = markup
-        if protect: kw["protect_content"] = True
-        kw.update(_timeout_kw())
-        with open(video_path, "rb") as vf:
-            kw["document"] = InputFile(vf, filename="video.mp4")
-            return await bot.send_document(**kw)
-
-    last_error = None
-    try:
-        send_variants = [(True, True), (False, True), (False, False)]
-        for attempt in range(1, 4):
-            for use_thumb, use_meta in send_variants:
-                try:
-                    return await _try_send_video(use_thumb, use_meta)
-                except TypeError:
-                    with open(video_path, "rb") as vf:
-                        kw = dict(base_kw)
-                        if not use_meta:
-                            kw.pop("width", None)
-                            kw.pop("height", None)
-                            kw.pop("duration", None)
-                        kw["video"] = vf
-                        return await bot.send_video(**kw)
-                except RetryAfter as e:
-                    last_error = e
-                    logger.warning(f"send_video RetryAfter: {e.retry_after}s")
-                    await asyncio.sleep(float(e.retry_after) + 1)
-                except (TimedOut, NetworkError) as e:
-                    last_error = e
-                    logger.warning(f"send_video urinish {attempt}/3 tarmoq xatosi: {e}")
-                    break
-                except BadRequest as e:
-                    last_error = e
-                    logger.warning(f"send_video varianti o'tmadi (thumb={use_thumb}, meta={use_meta}): {e}")
-                    continue
-                except TelegramError as e:
-                    last_error = e
-                    logger.warning(f"send_video Telegram xato: {e}")
-                    continue
-            if attempt < 3:
-                await asyncio.sleep(2 * attempt)
-
-        if os.environ.get("ALLOW_DOCUMENT_FALLBACK", "0") == "1":
-            logger.warning(f"send_video bo'lmadi, document fallback qilinadi: {last_error}")
-            return await _try_send_document()
-        logger.error(f"send_video bo'lmadi — document rejimga o'tkazilmadi: {last_error}")
-        raise last_error or RuntimeError("send_video bo'lmadi")
-    finally:
-        if thumb_path and os.path.exists(thumb_path):
-            try: os.unlink(thumb_path)
-            except Exception: pass
-
-
-async def _send_original_video_fallback(bot, chat_id: int, file_id: str, caption: str,
-                                        markup=None, pm="HTML", protect=False):
-    """Watermark qilib bo'lmasa ham qism xato bo'lib qolmasligi uchun original file_id bilan yuboradi."""
-    from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
-    # Fallback bo'lsa ham ogohlantirish va himoya yoqilgan bo'lsin
-    protect = True
-    caption = _with_warn(caption)
-
-    kw = {
-        "chat_id": chat_id,
-        "video": file_id,
-        "caption": caption,
-        "parse_mode": pm,
-        "supports_streaming": True,
-    }
-    if markup: kw["reply_markup"] = markup
-    if protect: kw["protect_content"] = True
-
-    timeout_kw = {
-        "read_timeout": VIDEO_IO_TIMEOUT,
-        "write_timeout": VIDEO_IO_TIMEOUT,
-        "connect_timeout": VIDEO_IO_TIMEOUT,
-        "pool_timeout": VIDEO_IO_TIMEOUT,
-    }
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            return await bot.send_video(**kw, **timeout_kw)
-        except TypeError:
-            return await bot.send_video(**kw)
-        except RetryAfter as e:
-            last_error = e
-            await asyncio.sleep(float(e.retry_after) + 1)
-        except (TimedOut, NetworkError) as e:
-            last_error = e
-            logger.warning(f"original send_video urinish {attempt}/3 xato: {e}")
-            if attempt < 3:
-                await asyncio.sleep(2 * attempt)
-        except (BadRequest, TelegramError) as e:
-            last_error = e
-            logger.warning(f"original send_video xato: {e}")
-            break
-
-    if os.environ.get("ALLOW_DOCUMENT_FALLBACK", "0") != "1":
-        logger.error(f"original send_video bo'lmadi — document rejimga o'tkazilmadi: {last_error}")
-        raise last_error or RuntimeError("original send_video bo'lmadi")
-
-    try:
-        doc_kw = {
-            "chat_id": chat_id,
-            "document": file_id,
-            "caption": caption,
-            "parse_mode": pm,
-        }
-        if markup: doc_kw["reply_markup"] = markup
-        if protect: doc_kw["protect_content"] = True
-        return await bot.send_document(**doc_kw, **timeout_kw)
-    except TypeError:
-        return await bot.send_document(**doc_kw)
-    except Exception:
-        raise last_error
-
-
-def _add_watermark_ffmpeg(input_path: str, output_path: str, user_id: str, username: str = "") -> bool:
-    """
-    ffmpeg orqali videoga majburiy watermark qo'shadi.
-    Watermark: "O'g'irlash taqiqlanadi" + foydalanuvchi ID + foydalanuvchi nomi.
-    Video o'lchami o'zgarmaydi: scale ishlatilmaydi, faqat drawtext qo'shiladi.
+    ffmpeg orqali videoga watermark qo'shadi.
+    textfile= usuli ishlatiladi — apostrof muammosi yo'q.
     """
     textfile_path = None
     try:
-        safe_user_id = str(user_id or "").strip() or "Nomaʼlum"
-        safe_username = str(username or "").strip().replace("\n", " ").replace("\r", " ")
-        safe_username = safe_username[:32]
-        if safe_username and not safe_username.startswith("@"):
-            safe_username = "@" + safe_username
-        if not safe_username or safe_username == "@":
-            # Foydalanuvchi nomi qo'yilmagan bo'lsa — aniq yozib qo'yamiz
-            safe_username = "Username qo'yilmagan"
-
+        # Matnni alohida faylga yozamiz — ekranlash muammosi bo'lmaydi
         fd, textfile_path = tempfile.mkstemp(suffix=".txt", prefix="wm_txt_")
         os.close(fd)
-        with open(textfile_path, "w", encoding="utf-8") as tf:
-            tf.write(
-                "O'g'irlash taqiqlanadi\n"
-                f"ID: {safe_user_id}\n"
-                f"User: {safe_username}"
-            )
+        wm_line1 = "O'g'irlash taqiqlanadi"
+        wm_line2 = f"ID: {user_id}"
 
         font_path = _find_font()
-        font_opt = f":fontfile={font_path}" if font_path else ""
+        font_opt  = f":fontfile={font_path}" if font_path else ""
 
-        # Watermark suzib yurmaydi: 2 sekundlik slotlarda joyi keskin almashadi.
-        # 1.35 sekund ko'rinadi, keyin 0.65 sekund yo'qoladi — uzun videoda ham takrorlanadi.
-        visible_expr = "lt(mod(t\\,2)\\,1.35)"
-        x_expr = "20+mod(41*floor(t/2)+17\\,100)/100*(w-text_w-40)"
-        y_expr = "20+mod(67*floor(t/2)+31\\,100)/100*(h-text_h-40)"
-
-        vf_filter = (
-            f"drawtext=textfile={textfile_path}"
+        base = (
+            f"fontsize=30:fontcolor=white"
+            f":box=1:boxcolor=black@0.5:boxborderw=8"
             f"{font_opt}"
-            f":fontsize=26"
-            f":fontcolor=white@0.96"
-            f":line_spacing=8"
-            f":box=1:boxcolor=black@0.60:boxborderw=14"
-            f":borderw=2:bordercolor=black@0.85"
-            f":x='{x_expr}'"
-            f":y='{y_expr}'"
-            f":enable='{visible_expr}'"
         )
+
+        # Turli joylarda paydo bo'lib yo'qoluvchi 6 ta drawtext
+        # textfile= uchun har bir joylashuv uchun alohida fayl kerak emas —
+        # x/y/alpha farqli, lekin bir xil textfile ishlatsa bo'ladi
+        positions = [
+            # (x_expr,                           y_expr,                       t_offset)
+            ("(main_w-text_w)/2",                "(main_h-text_h)/2",          0.0),
+            ("w*0.05",                           "h*0.05",                     0.7),
+            ("main_w-text_w-w*0.05",             "h*0.05",                     1.4),
+            ("w*0.05",                           "main_h-text_h-h*0.08",       2.1),
+            ("main_w-text_w-w*0.05",             "main_h-text_h-h*0.08",       2.8),
+            ("(main_w-text_w)/2",                "h*0.88",                     3.5),
+        ]
+
+        filters = []
+        for x, y, off in positions:
+            alpha = f"if(lt(mod(t+{off},5),2.5),0.9,0)"
+            # line1
+            with open(textfile_path, "w", encoding="utf-8") as tf:
+                tf.write(wm_line1)
+            f1 = (
+                f"drawtext=textfile={textfile_path}"
+                f":{base}"
+                f":x={x}:y={y}"
+                f":alpha='{alpha}'"
+            )
+            # line2 (biroz pastroq)
+            with open(textfile_path, "w", encoding="utf-8") as tf:
+                tf.write(wm_line2)
+            f2 = (
+                f"drawtext=textfile={textfile_path}"
+                f":{base}:fontsize=22"
+                f":x={x}:y={y}+36"
+                f":alpha='{alpha}'"
+            )
+            filters.append(f1)
+            filters.append(f2)
+
+        # Muammoni hal qilish: textfile har bir drawtext uchun ayni paytda o'qiladi,
+        # shuning uchun HAMMA drawtext uchun alohida temp fayl yaratamiz
+        # (yuqoridagi kod faqat oxirgi faylni yozadi).
+        # To'g'ri yechim: har bir drawtext uchun alohida temp fayl.
+
+        tmp_files = []
+        filters_fixed = []
+        for x, y, off in positions:
+            alpha = f"if(lt(mod(t+{off},5),2.5),0.9,0)"
+
+            fd1, tf1 = tempfile.mkstemp(suffix=".txt", prefix="wm1_")
+            os.close(fd1)
+            with open(tf1, "w", encoding="utf-8") as fh:
+                fh.write(wm_line1)
+            tmp_files.append(tf1)
+
+            fd2, tf2 = tempfile.mkstemp(suffix=".txt", prefix="wm2_")
+            os.close(fd2)
+            with open(tf2, "w", encoding="utf-8") as fh:
+                fh.write(wm_line2)
+            tmp_files.append(tf2)
+
+            f1 = (
+                f"drawtext=textfile={tf1}"
+                f":{base}"
+                f":x={x}:y={y}"
+                f":alpha='{alpha}'"
+            )
+            f2 = (
+                f"drawtext=textfile={tf2}"
+                f":{base}:fontsize=22"
+                f":x={x}:y={y}+38"
+                f":alpha='{alpha}'"
+            )
+            filters_fixed.append(f1)
+            filters_fixed.append(f2)
+
+        vf_filter = ",".join(filters_fixed)
 
         cmd = [
             "ffmpeg", "-y",
-            "-hide_banner", "-loglevel", "error",
             "-i", input_path,
             "-vf", vf_filter,
-            "-map", "0:v:0", "-map", "0:a?",
             "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
-            "-threads", "2",
-            "-pix_fmt", "yuv420p",
-            "-map_metadata", "0",
-            "-c:a", "aac",
-            "-b:a", "128k",
+            "-preset", "ultrafast",
+            "-crf", "22",
+            "-c:a", "copy",
             "-movflags", "+faststart",
-            output_path,
+            output_path
         ]
 
-        logger.info("ffmpeg watermark: boshlandi")
-        result = subprocess.run(cmd, capture_output=True, timeout=WM_FFMPEG_TIMEOUT)
+        logger.info(f"ffmpeg buyruq: {' '.join(cmd[:6])} ...")
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
 
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")
-            logger.error(f"ffmpeg xato (returncode={result.returncode}):\n{err[:1500]}")
+            logger.error(f"ffmpeg xato (returncode={result.returncode}):\n{err[:800]}")
             return False
 
-        if not os.path.exists(output_path) or os.path.getsize(output_path) <= 1000:
-            logger.error("ffmpeg watermark: output fayl bo'sh yoki juda kichik")
-            return False
-
-        logger.info(f"ffmpeg watermark: muvaffaqiyatli ({os.path.getsize(output_path)//1024} KB)")
+        logger.info("ffmpeg watermark: muvaffaqiyatli!")
         return True
 
     except subprocess.TimeoutExpired:
-        logger.error(f"ffmpeg: vaqt tugadi ({WM_FFMPEG_TIMEOUT} soniya)")
+        logger.error("ffmpeg: vaqt tugadi (5 daqiqa)")
         return False
     except Exception as e:
         logger.error(f"ffmpeg istisno: {e}")
         return False
     finally:
-        if textfile_path and os.path.exists(textfile_path):
-            try:
-                os.unlink(textfile_path)
-            except Exception:
-                pass
-
-
-# ─── Parallel watermark cheklovi (CPU tiqilmasin) ──────
-_WM_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("WM_PARALLEL") or "6"))
-
-# Watermarklangan videolarni cache qilamiz — bir xil (file_id, user_id) qayta ishlanmasin
-_WM_CACHE: dict = {}
-_WM_CACHE_MAX = 2000
-_WM_VERSION = "popup_every_3s_native_video_v5"
-
-
-
-WARN_PREFIX = "⚠️ <b>O'g'irlash qat'iyan taqiqlanadi!</b>\n\n"
-
-def _with_warn(caption: str) -> str:
-    cap = caption or ""
-    if "O'g'irlash" in cap or "Ogirlash" in cap:
-        return cap
-    return WARN_PREFIX + cap
-
-async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
-                         user_id, username: str = "", markup=None, pm="HTML", protect=False):
-    """
-    Videoni foydalanuvchiga majburiy watermark bilan yuboradi.
-    Tez va bir vaqtning o'zida ko'p foydalanuvchi uchun: cache + parallel ffmpeg.
-    """
-    # MAJBURIY: har doim protect_content va ogohlantirish caption
-    protect = True
-    caption = _with_warn(caption)
-
-    # Cache: shu (file_id, user_id) avval ishlangan bo'lsa — tayyor file_id bilan yuboramiz (tez!)
-    cache_key = (_WM_VERSION, str(file_id), int(user_id) if user_id else 0)
-    cached_fid = _WM_CACHE.get(cache_key)
-    if cached_fid:
-        try:
-            return await bot.send_video(
-                chat_id=chat_id, video=cached_fid, caption=caption,
-                parse_mode=pm, reply_markup=markup, protect_content=True,
-                supports_streaming=True,
-            )
-        except Exception as ce:
-            logger.warning(f"cache fid ishlamadi, qayta ishlanadi: {ce}")
-            _WM_CACHE.pop(cache_key, None)
-
-    if not _check_ffmpeg():
-        logger.error("❌ ffmpeg topilmadi — watermark qo'yib bo'lmaydi")
-        return await sm(bot, chat_id, "❌ Video tayyorlanmadi. Serverda ffmpeg topilmadi.", pm=pm)
-
-    tmp_in = None
-    tmp_out = None
-    tmp_small = None
-    try:
-        async def _do_watermark():
-            nonlocal tmp_in, tmp_out, tmp_small
-            tg_file = await bot.get_file(file_id)
-
-            fd_in, tmp_in = tempfile.mkstemp(suffix=".mp4", prefix="wm_in_")
-            fd_out, tmp_out = tempfile.mkstemp(suffix=".mp4", prefix="wm_out_")
-            os.close(fd_in)
-            os.close(fd_out)
-
-            await _download_tg_file_safely(tg_file, tmp_in)
-            logger.info(f"Watermark: {file_id[:20]}... yuklab olindi ({os.path.getsize(tmp_in)//1024} KB)")
-
-            async with _WM_SEMAPHORE:
-                success = await asyncio.to_thread(
-                    _add_watermark_ffmpeg,
-                    tmp_in,
-                    tmp_out,
-                    str(user_id),
-                    str(username or ""),
-                )
-
-            if success and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1000:
-                send_path, tmp_small = await asyncio.to_thread(_compress_video_to_telegram_limit, tmp_out)
-                msg = await _send_video_file_safely(
-                    bot, chat_id, send_path, caption,
-                    markup=markup, pm=pm, protect=protect,
-                )
-                try:
-                    # Cache faqat native video file_id uchun: document file_id ni keyingi safar
-                    # send_video sifatida yuborish xato berishi mumkin.
-                    fid = getattr(getattr(msg, "video", None), "file_id", None)
-                    if fid:
-                        if len(_WM_CACHE) > _WM_CACHE_MAX:
-                            _WM_CACHE.clear()
-                        _WM_CACHE[cache_key] = fid
-                except Exception:
-                    pass
-                return msg
-
-            logger.error("Watermark qo'yilmadi — original video fallback yuboriladi")
-            return await _send_original_video_fallback(
-                bot, chat_id, file_id, caption,
-                markup=markup, pm=pm, protect=protect,
-            )
-
-        return await asyncio.wait_for(_do_watermark(), timeout=WM_TOTAL_TIMEOUT)
-
-    except asyncio.TimeoutError:
-        logger.error(f"sv_watermarked: {WM_TOTAL_TIMEOUT}s timeout — original video fallback yuboriladi")
-        try:
-            return await _send_original_video_fallback(
-                bot, chat_id, file_id, caption,
-                markup=markup, pm=pm, protect=protect,
-            )
-        except Exception as fb_e:
-            logger.error(f"original fallback ham xato: {fb_e}")
-            return await sm(bot, chat_id, "❌ Video yuborishda xato. Qayta urinib ko'ring.", pm=pm)
-    except Exception as e:
-        logger.error(f"sv_watermarked xato: {e}")
-        try:
-            return await _send_original_video_fallback(
-                bot, chat_id, file_id, caption,
-                markup=markup, pm=pm, protect=protect,
-            )
-        except Exception as fb_e:
-            logger.error(f"original fallback ham xato: {fb_e}")
-            return await sm(bot, chat_id, "❌ Video yuborishda xato. Qayta urinib ko'ring.", pm=pm)
-    finally:
-        for p in [tmp_in, tmp_out, tmp_small]:
+        # Vaqtinchalik matn fayllarini o'chiramiz
+        for p in ([textfile_path] if textfile_path else []) + (tmp_files if 'tmp_files' in dir() else []):
             if p and os.path.exists(p):
                 try:
                     os.unlink(p)
                 except Exception:
                     pass
+
+
+async def sv_watermarked(bot, chat_id: int, file_id: str, caption: str,
+                         user_id, markup=None, pm="HTML", protect=False):
+    """
+    Videoni foydalanuvchiga watermark bilan yuboradi.
+    ffmpeg mavjud bo'lmasa yoki xato bo'lsa — oddiy video yuboriladi.
+    45 soniyadan oshsa — originalni yuborib, kutmaymiz.
+    """
+    # Har safar runtime da tekshiramiz (modul yuklanganda emas)
+    if not _check_ffmpeg():
+        logger.warning("❌ ffmpeg topilmadi — watermarksiz yuborilmoqda")
+        return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
+
+    tmp_in  = None
+    tmp_out = None
+    try:
+        async def _do_watermark():
+            nonlocal tmp_in, tmp_out
+            # 1) Telegram faylini yuklab olamiz
+            tg_file = await bot.get_file(file_id)
+            suffix  = ".mp4"
+
+            # Vaqtinchalik fayllar
+            fd_in,  tmp_in  = tempfile.mkstemp(suffix=suffix, prefix="wm_in_")
+            fd_out, tmp_out = tempfile.mkstemp(suffix=suffix, prefix="wm_out_")
+            os.close(fd_in)
+            os.close(fd_out)
+
+            # Video yuklab olamiz
+            await tg_file.download_to_drive(tmp_in)
+            logger.info(f"Watermark: {file_id[:20]}... yuklab olindi ({os.path.getsize(tmp_in)//1024} KB)")
+
+            # ffmpeg watermark — alohida threadda (bloklash uchun)
+            success = await asyncio.to_thread(_add_watermark_ffmpeg, tmp_in, tmp_out, str(user_id))
+
+            if success and os.path.getsize(tmp_out) > 1000:
+                logger.info(f"Watermark: muvaffaqiyatli ({os.path.getsize(tmp_out)//1024} KB)")
+                with open(tmp_out, "rb") as vf:
+                    return await sv(bot, chat_id, vf, caption, markup, pm, protect)
+            else:
+                logger.warning("Watermark: ffmpeg muvaffaqiyatsiz — originalni yuboramiz")
+                return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
+
+        # ── 45 soniya timeout — bot qotib qolmasin ──
+        return await asyncio.wait_for(_do_watermark(), timeout=45.0)
+
+    except asyncio.TimeoutError:
+        logger.warning(f"sv_watermarked: 45s timeout — originalni yuboramiz")
+        try:
+            return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
+        except Exception as e2:
+            logger.error(f"sv_watermarked timeout fallback xato: {e2}")
+    except Exception as e:
+        logger.error(f"sv_watermarked xato: {e}")
+        # Xato bo'lsa oddiy video yuboramiz
+        try:
+            return await sv(bot, chat_id, file_id, caption, markup, pm, protect)
+        except Exception as e2:
+            logger.error(f"sv_watermarked fallback xato: {e2}")
+    finally:
+        # Vaqtinchalik fayllarni o'chiramiz
+        for p in [tmp_in, tmp_out]:
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
 
 # ══════════════════════════════════════════════════════════
 # KANAL YORDAMCHI
@@ -3473,9 +2871,6 @@ def _channels_list_text() -> str:
 
 async def send_movie_menu(src, context, code: str):
     code = str(code).upper().strip()
-    found_code, matches = find_movie_code(code)
-    if found_code:
-        code = str(found_code).upper().strip()
     movie = RAM.movies.get(code)
 
     # ✅ TUZATISH: to'g'ridan-to'g'ri topilmasa — raqamli moslik ham sinash
@@ -4375,60 +3770,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await sm(context.bot, uid, "ℹ️ Bot yaratish faqat asosiy botda ishlaydi.", main_menu_kb(is_any_admin(uid)))
             return
         FACTORY_WAITING_TOKEN.discard(uid)
-        u = RAM.ensure_user(uid)
-        bal = int(u.get("balance", 0) or 0)
         txt = (
-            "🤖 <b>Bot yaratish</b>\n\n"
-            f"💎 <b>Narxi:</b> <code>{BOT_CREATE_PRICE:,}</code> so'm "
-            "(birinchi marta bot yaratish)\n\n"
-            "<blockquote>📌 <b>Bot haqida ma'lumot</b>\n\n"
-            f"• Bot yaratish — bir martalik <b>{BOT_CREATE_PRICE:,} so'm</b>\n"
-            f"• Sotib olgandan so'ng <b>{BOT_TRIAL_DAYS} kun TEKIN</b> ishlaydi\n"
-            "• Keyin <b>oylik to'lov</b> bo'ladi (tariflar bo'yicha)\n"
-            "• Muddatni «🔄 Bot muddatini uzaytirish» tugmasi orqali uzaytirasiz\n"
-            "• Agar muddat o'tib ketsa, sizning botingiz <b>ishlamay qoladi</b> — "
-            "uzaytirgandan keyin yana avtomatik ishlaydi</blockquote>\n\n"
-            f"💰 <b>Sizning balansingiz:</b> <code>{bal:,}</code> so'm\n\n"
-            "Davom etish uchun pastdagi tugmani bosing 👇"
-        ).replace(",", " ")
-        kb = ikb([
-            [ibtn(f"💳 Sotib olish ({BOT_CREATE_PRICE:,} so'm)".replace(",", " "),
-                  data="factory_buy", style="success")],
-            [ibtn("💰 Hisobni to'ldirish", data="topup_back_balans", style="primary")],
-            [ibtn("⬅️ Orqaga", data="factory_home")],
-        ])
-        await sm(context.bot, uid, txt, kb)
-        return
-
-    if data == "factory_buy":
-        if IS_CHILD_BOT:
-            await sm(context.bot, uid, "ℹ️ Bot yaratish faqat asosiy botda ishlaydi.", main_menu_kb(is_any_admin(uid)))
-            return
-        u = RAM.ensure_user(uid)
-        bal = int(u.get("balance", 0) or 0)
-        if bal < BOT_CREATE_PRICE:
-            need = BOT_CREATE_PRICE - bal
-            await sm(context.bot, uid,
-                     (f"❌ <b>Balansingiz yetarli emas.</b>\n\n"
-                      f"💰 Hozirgi balans: <code>{bal:,}</code> so'm\n"
-                      f"💎 Kerak: <code>{BOT_CREATE_PRICE:,}</code> so'm\n"
-                      f"📉 Yetishmayapti: <code>{need:,}</code> so'm").replace(",", " "),
-                     ikb([
-                         [ibtn("💰 Hisobni to'ldirish", data="topup_back_balans", style="success")],
-                         [ibtn("⬅️ Orqaga", data="factory_create")],
-                     ]))
-            return
-        # Pulni yechib qo'yamiz va token kutuvchilar ro'yxatiga qo'shamiz
-        u["balance"] = bal - BOT_CREATE_PRICE
-        try:
-            save_sync()
-        except Exception:
-            pass
-        FACTORY_PAID_TO_CREATE.add(uid)
-        FACTORY_WAITING_TOKEN.discard(uid)
-        txt = (
-            "✅ <b>To'lov qabul qilindi!</b>\n\n"
-            f"🎁 Sizga <b>{BOT_TRIAL_DAYS} kun tekin</b> berildi.\n\n"
+            "🤖 <b>Kino bot yaratish</b>\n\n"
             "<blockquote>📌 <b>Tokenni qanday olish kerak?</b>\n\n"
             "1️⃣ Telegram'da <b>@BotFather</b> botiga kiring\n"
             "2️⃣ <code>/newbot</code> buyrug'ini yuboring\n"
@@ -4437,7 +3780,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "5️⃣ BotFather sizga <b>token</b> beradi:\n"
             "   <code>1234567890:AAH...xYz</code>\n"
             "6️⃣ Pastdagi tugmani bosing va tokenni shu yerga yuboring</blockquote>\n\n"
-            "⚠️ <b>Diqqat:</b> Token <b>maxfiy</b> — uni hech kimga bermang!"
+            "⚠️ <b>Diqqat:</b> Token <b>maxfiy</b> — uni hech kimga bermang!\n"
+            "✅ Token to'g'ri bo'lsa, botingiz <b>darhol</b> ishga tushadi va siz uning <b>egasi</b> bo'lasiz."
         )
         kb = ikb([
             [ibtn("📤 Tokenni yuborish", data="factory_send_token", style="success")],
@@ -4450,22 +3794,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if IS_CHILD_BOT:
             await sm(context.bot, uid, "ℹ️ Bot yaratish faqat asosiy botda ishlaydi.", main_menu_kb(is_any_admin(uid)))
             return
-        if uid not in FACTORY_PAID_TO_CREATE:
-            await sm(context.bot, uid,
-                     "⚠️ Avval bot yaratish uchun to'lov qiling.",
-                     ikb([[ibtn("💳 Sotib olishga o'tish", data="factory_create", style="success")]]))
-            return
         FACTORY_WAITING_TOKEN.add(uid)
-        prompt_msg = await sm(context.bot, uid,
+        await sm(context.bot, uid,
                  "📥 <b>Tokenni shu yerga yuboring</b>\n\n"
                  "Format: <code>1234567890:AAH...xYz</code>",
                  ikb([[ibtn("❌ Bekor qilish", data="factory_home")]]))
-        context.user_data["factory_token_prompt_id"] = prompt_msg.message_id
         return
 
     if data == "factory_home":
         FACTORY_WAITING_TOKEN.discard(uid)
-        context.user_data.pop("factory_token_prompt_id", None)
         await sm(context.bot, uid, "🏠 Asosiy menyu", main_menu_kb(is_any_admin(uid)))
         return
 
@@ -4481,126 +3818,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not bots:
             txt = ("📭 <b>Sizda hali bot yo'q.</b>\n\n"
                    "«🤖 Bot yaratish» tugmasini bosing.")
-            kb_rows = [
-                [ibtn("🤖 Yangi bot yaratish", data="factory_create", style="primary")],
-                [ibtn("⬅️ Orqaga", data="factory_home")],
-            ]
         else:
             lines = ["📋 <b>Sizning botlaringiz:</b>\n"]
-            kb_rows = []
             for b in bots:
-                expired = factory_is_expired(b)
-                status = b["status"]
-                if expired and status == "active":
-                    status = "expired"
-                e = "🟢" if (status == "active" and not expired) else ("⏰" if expired or status == "expired" else "🔴")
-                exp = b.get("expires_at")
-                exp_txt = exp.strftime("%Y-%m-%d %H:%M") if exp else "—"
-                lines.append(
-                    f"{e} <b>@{b['bot_username']}</b>\n"
-                    f"   ID: <code>{b['id']}</code> · Holat: <b>{status}</b>\n"
-                    f"   ⏳ Muddat: <code>{exp_txt}</code>"
-                )
-                kb_rows.append([ibtn(f"🔄 @{b['bot_username']} muddatini uzaytirish",
-                                     data=f"factory_extend:{b['id']}", style="success")])
-            txt = "\n\n".join(lines)
-            kb_rows.append([ibtn("🤖 Yangi bot yaratish", data="factory_create", style="primary")])
-            kb_rows.append([ibtn("⬅️ Orqaga", data="factory_home")])
-        await sm(context.bot, uid, txt, ikb(kb_rows))
+                e = "🟢" if b["status"] == "active" else "🔴"
+                lines.append(f"{e} <b>@{b['bot_username']}</b> — {b['status']} "
+                             f"(ID: <code>{b['id']}</code>)")
+            txt = "\n".join(lines)
+        kb = ikb([
+            [ibtn("🤖 Yangi bot yaratish", data="factory_create", style="primary")],
+            [ibtn("⬅️ Orqaga", data="factory_home")],
+        ])
+        await sm(context.bot, uid, txt, kb)
         return
-
-    if data.startswith("factory_extend:"):
-        if IS_CHILD_BOT:
-            await sm(context.bot, uid, "ℹ️ Bu bo'lim faqat asosiy botda ishlaydi.", main_menu_kb(is_any_admin(uid)))
-            return
-        try:
-            bid = int(data.split(":", 1)[1])
-        except Exception:
-            return
-        row = factory_db_get(bid)
-        if not row or row["owner_id"] != uid:
-            await sm(context.bot, uid, "❌ Bot topilmadi yoki sizga tegishli emas.")
-            return
-        exp = row.get("expires_at")
-        exp_txt = exp.strftime("%Y-%m-%d %H:%M") if exp else "—"
-        u = RAM.ensure_user(uid)
-        bal = int(u.get("balance", 0) or 0)
-        txt = (
-            f"🔄 <b>Bot muddatini uzaytirish</b>\n\n"
-            f"🤖 <b>@{row['bot_username']}</b>\n"
-            f"⏳ Joriy muddat: <code>{exp_txt}</code>\n"
-            f"💰 Balans: <code>{bal:,}</code> so'm\n\n"
-            "Tarifni tanlang 👇"
-        ).replace(",", " ")
-        kb_rows = []
-        for t in BOT_EXTEND_TARIFFS:
-            kb_rows.append([ibtn(
-                f"📅 {t['label']} — {t['price']:,} so'm".replace(",", " "),
-                data=f"factory_extend_do:{bid}:{t['days']}:{t['price']}",
-                style="primary")])
-        kb_rows.append([ibtn("⬅️ Orqaga", data="factory_mybots")])
-        await sm(context.bot, uid, txt, ikb(kb_rows))
-        return
-
-    if data.startswith("factory_extend_do:"):
-        if IS_CHILD_BOT:
-            await sm(context.bot, uid, "ℹ️ Bu bo'lim faqat asosiy botda ishlaydi.", main_menu_kb(is_any_admin(uid)))
-            return
-        try:
-            _, bid_s, days_s, price_s = data.split(":")
-            bid = int(bid_s); days = int(days_s); price = int(price_s)
-        except Exception:
-            return
-        row = factory_db_get(bid)
-        if not row or row["owner_id"] != uid:
-            await sm(context.bot, uid, "❌ Bot topilmadi yoki sizga tegishli emas.")
-            return
-        u = RAM.ensure_user(uid)
-        bal = int(u.get("balance", 0) or 0)
-        if bal < price:
-            need = price - bal
-            await sm(context.bot, uid,
-                     (f"❌ <b>Balansingiz yetarli emas.</b>\n\n"
-                      f"💰 Balans: <code>{bal:,}</code> so'm\n"
-                      f"💎 Kerak: <code>{price:,}</code> so'm\n"
-                      f"📉 Yetishmayapti: <code>{need:,}</code> so'm").replace(",", " "),
-                     ikb([
-                         [ibtn("💰 Hisobni to'ldirish", data="topup_back_balans", style="success")],
-                         [ibtn("⬅️ Orqaga", data=f"factory_extend:{bid}")],
-                     ]))
-            return
-        u["balance"] = bal - price
-        try:
-            save_sync()
-        except Exception:
-            pass
-        new_exp = factory_db_extend(bid, days, price)
-        # Agar bot to'xtagan/expired bo'lsa — qayta yoqamiz
-        try:
-            row2 = factory_db_get(bid)
-            if row2 and row2["status"] != "active":
-                factory_db_set_status(bid, "active")
-                row2 = factory_db_get(bid)
-            if row2:
-                p = FACTORY_RUNNING.get(bid)
-                if p is None or p.poll() is not None:
-                    factory_spawn(row2)
-        except Exception as e:
-            logger.error(f"factory_extend_do spawn: {e}")
-        exp_txt = new_exp.strftime("%Y-%m-%d %H:%M") if new_exp else "—"
-        await sm(context.bot, uid,
-                 (f"✅ <b>Muddat uzaytirildi!</b>\n\n"
-                  f"🤖 <b>@{row['bot_username']}</b>\n"
-                  f"➕ Qo'shildi: <b>{days} kun</b>\n"
-                  f"💳 To'landi: <code>{price:,}</code> so'm\n"
-                  f"⏳ Yangi muddat: <code>{exp_txt}</code>").replace(",", " "),
-                 ikb([
-                     [ibtn("📋 Mening botlarim", data="factory_mybots")],
-                     [ibtn("🏠 Bosh menyu", data="factory_home")],
-                 ]))
-        return
-
-
 
     if data.startswith("factory_stop:"):
         try:
@@ -4621,63 +3851,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⛔ Faqat asosiy admin", show_alert=True)
             return
         await factory_send_admin_list(context.bot, uid, q)
-        return
-
-    if data == "factory_tariffs_admin":
-        if not is_super_admin(uid):
-            await q.answer("⛔ Faqat asosiy admin", show_alert=True)
-            return
-        await factory_send_tariffs_admin(context.bot, uid, q)
-        return
-
-    if data == "factory_tariff_add":
-        if not is_super_admin(uid):
-            await q.answer("⛔ Faqat asosiy admin", show_alert=True)
-            return
-        context.user_data["admin_state"] = "factory_tariff_new_label"
-        context.user_data["factory_tariff_buf"] = {}
-        await sm(context.bot, uid,
-                 "➕ <b>Yangi tarif qo'shish</b>\n\n"
-                 "1/3 — Tarif <b>nomini</b> kiriting (masalan: <code>2 oy</code>):")
-        return
-
-    if data.startswith("factory_tariff_edit:"):
-        if not is_super_admin(uid):
-            await q.answer("⛔ Faqat asosiy admin", show_alert=True)
-            return
-        try:
-            idx = int(data.split(":", 1)[1])
-            t = BOT_EXTEND_TARIFFS[idx]
-        except Exception:
-            await q.answer("Tarif topilmadi", show_alert=True)
-            return
-        context.user_data["admin_state"] = "factory_tariff_edit_label"
-        context.user_data["factory_tariff_idx"] = idx
-        context.user_data["factory_tariff_buf"] = {}
-        await sm(context.bot, uid,
-                 f"✏️ <b>Tarifni tahrirlash</b>\n\n"
-                 f"Joriy: <b>{html.escape(str(t['label']))}</b> — "
-                 f"{int(t['days'])} kun — {int(t['price']):,} so'm\n\n"
-                 "1/3 — Yangi <b>nomini</b> kiriting (yoki <code>-</code> — eski qoladi):".replace(",", " "))
-        return
-
-    if data.startswith("factory_tariff_del:"):
-        if not is_super_admin(uid):
-            await q.answer("⛔ Faqat asosiy admin", show_alert=True)
-            return
-        # mutate in place; no global needed
-        try:
-            idx = int(data.split(":", 1)[1])
-            if 0 <= idx < len(BOT_EXTEND_TARIFFS):
-                BOT_EXTEND_TARIFFS.pop(idx)
-                save_extend_tariffs(BOT_EXTEND_TARIFFS)
-                await q.answer("🗑 O'chirildi")
-            else:
-                await q.answer("Tarif topilmadi", show_alert=True)
-        except Exception as e:
-            await q.answer(f"Xato: {e}", show_alert=True)
-        await factory_send_tariffs_admin(context.bot, uid, q)
-        return
         return
 
     if data.startswith("factory_admin_stop:") or data.startswith("factory_admin_start:") or data.startswith("factory_admin_del:"):
@@ -5630,15 +4803,12 @@ async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = q.data.split("|")
     if len(parts) != 3: return
     _, code, ep = parts
-    code = str(code).upper().strip()
-    found_code, _matches = find_movie_code(code)
-    if found_code:
-        code = str(found_code).upper().strip()
     movie = RAM.movies.get(code)
     if not movie:
         await q.answer("Kino topilmadi", show_alert=True)
         return
 
+    code = str(code).upper()
     user_id = str(q.from_user.id)
     price = price_to_int(movie.get("prices", {}).get(ep))
     RAM.ensure_user(user_id)
@@ -5729,7 +4899,6 @@ async def cb_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sv_watermarked(
             context.bot, q.from_user.id, eps[idx], caption,
             user_id=q.from_user.id,
-            username=(q.from_user.username or q.from_user.first_name or ""),
             markup=share_kb(share_url),
             protect=(bool(RAM.settings.get("content_protect", True)) and not is_super_admin(q.from_user.id))
         )
@@ -5936,15 +5105,14 @@ async def cb_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(pay["ep"]) - 1
         eps = movie.get("episodes", [])
         if 0 <= idx < len(eps):
-            await sm(context.bot, pay["user_id"],
-               "✅ <b>Admin chekingizni tasdiqladi!</b>\n\n"
-               f"🎬 Mana <b>{pay['ep']}-qism</b> videosini tomosha qiling 👇")
-            await sv_watermarked(
-                context.bot, pay["user_id"], eps[idx],
-                f"<b>{movie.get('title')}</b>\nQism: {pay['ep']}",
-                user_id=pay["user_id"],
-                username=(user_dict.get("username") or user_dict.get("name") or ""),
-                protect=(bool(RAM.settings.get("content_protect", True)) and not is_super_admin(pay["user_id"]))
+            await asyncio.gather(
+                sm(context.bot, pay["user_id"],
+                   "✅ <b>Admin chekingizni tasdiqladi!</b>\n\n"
+                   f"🎬 Mana <b>{pay['ep']}-qism</b> videosini tomosha qiling 👇"),
+                sv(context.bot, pay["user_id"], eps[idx],
+                   f"<b>{movie.get('title')}</b>\nQism: {pay['ep']}",
+                   protect=(bool(RAM.settings.get("content_protect", True)) and not is_super_admin(pay["user_id"]))),
+                return_exceptions=True,
             )
             async def update_pay_stats():
                 movie.setdefault("views", {})
@@ -6047,7 +5215,7 @@ async def cb_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _get_admin_reserved_texts() -> set:
     keys = [
         "kino_joy", "qism_qosh", "pullik", "stat", "kanal_post",
-        "maj_kanal", "emoji_soz", "asosiy",
+        "maj_kanal", "karta", "emoji_soz", "asosiy",
         "boshqarish", "broadcast", "kino_uch", "yordam", "install",
         "barcha_kino", "kino_kanal_set", "factory_bots",
         "premium_ber", "start_xab", "balans",
@@ -6097,53 +5265,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── 🏭 FACTORY: foydalanuvchi token yuborayotgan bo'lsa ──────
     if uid in FACTORY_WAITING_TOKEN:
         token = text
-
-        # "Tokenni shu yerga yuboring" promptini va foydalanuvchi
-        # yuborgan (maxfiy) token xabarini tozalaymiz — natija
-        # tepada qolgan eski xabar bilan aralashmasligi uchun.
-        prompt_id = context.user_data.pop("factory_token_prompt_id", None)
-        if prompt_id:
-            try:
-                await context.bot.delete_message(chat_id=uid, message_id=prompt_id)
-            except Exception:
-                pass
-        try:
-            await context.bot.delete_message(chat_id=uid, message_id=msg.message_id)
-        except Exception:
-            pass
-
         if ":" not in token or len(token) < 25:
-            err_msg = await sm(context.bot, uid,
+            await sm(context.bot, uid,
                      "❌ Token formati noto'g'ri. Iltimos, BotFather'dan olgan tokenni yuboring.",
                      ikb([[ibtn("❌ Bekor qilish", data="factory_home")]]))
-            context.user_data["factory_token_prompt_id"] = err_msg.message_id
             return
         info = factory_validate_token(token)
         if not info:
-            err_msg = await sm(context.bot, uid,
+            await sm(context.bot, uid,
                      "❌ Token noto'g'ri yoki ishlamayapti. BotFather'dan qaytadan oling.",
                      ikb([[ibtn("❌ Bekor qilish", data="factory_home")]]))
-            context.user_data["factory_token_prompt_id"] = err_msg.message_id
             return
         try:
             bid, schema = factory_db_insert(
                 uid, user.full_name or "", user.username or "",
-                token, info.get("username", ""), info.get("first_name", ""),
-                paid_amount=BOT_CREATE_PRICE, trial_days=BOT_TRIAL_DAYS)
+                token, info.get("username", ""), info.get("first_name", ""))
         except psycopg2.errors.UniqueViolation:
             FACTORY_WAITING_TOKEN.discard(uid)
-            # Token allaqachon ishlatilgan — pulni qaytaramiz
-            try:
-                if uid in FACTORY_PAID_TO_CREATE:
-                    u_ref = RAM.ensure_user(uid)
-                    u_ref["balance"] = int(u_ref.get("balance", 0) or 0) + BOT_CREATE_PRICE
-                    save_sync()
-                    FACTORY_PAID_TO_CREATE.discard(uid)
-            except Exception:
-                pass
             await sm(context.bot, uid,
-                     "⚠️ Bu token allaqachon ro'yxatdan o'tgan.\n"
-                     "💰 To'langan summa balansingizga qaytarildi.",
+                     "⚠️ Bu token allaqachon ro'yxatdan o'tgan.",
                      main_menu_kb(is_any_admin(uid)))
             return
         except Exception as e:
@@ -6151,7 +5291,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      main_menu_kb(is_any_admin(uid)))
             return
         FACTORY_WAITING_TOKEN.discard(uid)
-        FACTORY_PAID_TO_CREATE.discard(uid)
         ok = factory_spawn({
             "id": bid, "owner_id": uid, "token": token,
             "bot_username": info.get("username", ""),
@@ -6162,12 +5301,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"✅ <b>Botingiz yaratildi!</b>\n\n"
                      f"🤖 <b>@{info.get('username')}</b>\n"
                      f"🆔 <code>{bid}</code>\n"
-                     f"🟢 <b>ishlamoqda</b>\n"
-                     f"🎁 <b>{BOT_TRIAL_DAYS} kun tekin</b> berildi\n\n"
+                     f"🟢 <b>ishlamoqda</b>\n\n"
                      f"Endi Telegram'da o'z botingizga <code>/start</code> bosing!\n"
-                     f"Siz uning <b>admin</b>isiz.\n\n"
-                     f"⏰ Muddat tugagach, «📋 Mening botlarim» → "
-                     f"«🔄 Muddatni uzaytirish» orqali davom ettirasiz.",
+                     f"Siz uning <b>admin</b>isiz.",
                      ikb([
                          [ibtn("📋 Mening botlarim", data="factory_mybots")],
                          [ibtn("🏠 Bosh menyu", data="factory_home")],
@@ -6177,7 +5313,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "⚠️ Bot saqlandi, lekin ishga tushmadi. Admin tekshiradi.",
                      main_menu_kb(is_any_admin(uid)))
         return
-
 
     # ── 0. Hisobni to'ldirish — miqdor kiritish (ADMIN STATE DAN OLDIN) ──
     if context.user_data.get("admin_state") == "topup_amount":
@@ -6562,13 +5697,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_any_admin(uid):
         all_admin_btn_keys = [
             "kino_joy", "qism_qosh", "pullik", "stat",
-            "kanal_post", "maj_kanal", "ilova",
+            "kanal_post", "maj_kanal", "karta", "ilova",
             "emoji_soz", "asosiy", "boshqarish", "broadcast", "kino_uch",
             "kino_kanal_set", "qism_tahrir", "admin_qosh",
             "premium_ber", "start_xab", "qism_och", "foydalanuvchi_blok",
             "tolovlar", "premium_plan_manage", "referral_narxi",
             "admin_lichka_set", "top_referrers", "kontent_saqla",
-            "tolov_usul", "factory_bots",
+            "tolov_usul",
         ]
         # Ham to'liq matn, ham emoji-siz matn bilan tekshiramiz
         all_admin_btns = {}
@@ -6738,7 +5873,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["balans_msg_id"] = sent_balans.message_id
         return
 
-    if _main_btn("dost_taklif") or (IS_CHILD_BOT and _main_btn("dost_taklif_child")):
+    if _main_btn("dost_taklif"):
         u_data = RAM.ensure_user(uid)
         ref_count = len(u_data.get("referred_users", []))
         amount = int(RAM.settings.get("referral_amount", 200))
@@ -6959,16 +6094,17 @@ async def admin_buttons(update, context, text: str):
         return
 
     if _btn_match("factory_bots"):
-        if IS_CHILD_BOT:
-            await sm(context.bot, uid, "ℹ️ Bu bo'lim faqat asosiy botda mavjud.", admin_menu_kb(uid))
-            return
         if not is_super_admin(uid):
             await sm(context.bot, uid, "⛔ Faqat asosiy admin.", admin_menu_kb(uid))
             return
         await factory_send_admin_list(context.bot, uid)
         return
 
-
+    if _btn_match("karta"):
+        context.user_data["admin_state"] = "set_card"
+        cur = RAM.card_number or "Kiritilmagan"
+        await sm(context.bot, uid, f"Joriy karta: <code>{cur}</code>\n\nYangi karta raqamini yuboring:")
+        return
 
     if _btn_match("ilova"):
         context.user_data["admin_state"] = "set_install"
@@ -7165,93 +6301,6 @@ async def admin_state_handler(update, context, text: str) -> bool:
             admin_menu_kb(uid))
         return True
 
-    # ─── Bot muddatini uzaytirish — TARIF qo'shish/tahrirlash ───────────
-    if state in ("factory_tariff_new_label", "factory_tariff_edit_label"):
-        buf = context.user_data.setdefault("factory_tariff_buf", {})
-        is_edit = (state == "factory_tariff_edit_label")
-        idx = context.user_data.get("factory_tariff_idx")
-        val = text.strip()
-        if is_edit and val == "-":
-            try:
-                buf["label"] = str(BOT_EXTEND_TARIFFS[idx]["label"])
-            except Exception:
-                buf["label"] = val or "Tarif"
-        else:
-            if not val:
-                await sm(context.bot, uid, "❌ Nom bo'sh bo'lmasin. Yana kiriting:")
-                return True
-            buf["label"] = val[:30]
-        context.user_data["admin_state"] = (
-            "factory_tariff_edit_days" if is_edit else "factory_tariff_new_days"
-        )
-        await sm(context.bot, uid,
-                 "2/3 — Tarif <b>muddatini (kun)</b> kiriting (masalan: <code>60</code>):"
-                 + ("\n<i>Eski qiymat uchun</i> <code>-</code>" if is_edit else ""))
-        return True
-
-    if state in ("factory_tariff_new_days", "factory_tariff_edit_days"):
-        buf = context.user_data.setdefault("factory_tariff_buf", {})
-        is_edit = (state == "factory_tariff_edit_days")
-        idx = context.user_data.get("factory_tariff_idx")
-        val = text.strip()
-        if is_edit and val == "-":
-            try:
-                buf["days"] = int(BOT_EXTEND_TARIFFS[idx]["days"])
-            except Exception:
-                await sm(context.bot, uid, "❌ Musbat butun son kiriting:")
-                return True
-        else:
-            if not val.isdigit() or int(val) <= 0:
-                await sm(context.bot, uid, "❌ Musbat butun son kiriting (kun):")
-                return True
-            buf["days"] = int(val)
-        context.user_data["admin_state"] = (
-            "factory_tariff_edit_price" if is_edit else "factory_tariff_new_price"
-        )
-        await sm(context.bot, uid,
-                 "3/3 — Tarif <b>narxini (so'm)</b> kiriting (masalan: <code>180000</code>):"
-                 + ("\n<i>Eski qiymat uchun</i> <code>-</code>" if is_edit else ""))
-        return True
-
-    if state in ("factory_tariff_new_price", "factory_tariff_edit_price"):
-        # mutate in place; no global needed
-        buf = context.user_data.setdefault("factory_tariff_buf", {})
-        is_edit = (state == "factory_tariff_edit_price")
-        idx = context.user_data.get("factory_tariff_idx")
-        val = text.strip().replace(" ", "").replace("'", "")
-        if is_edit and val == "-":
-            try:
-                buf["price"] = int(BOT_EXTEND_TARIFFS[idx]["price"])
-            except Exception:
-                await sm(context.bot, uid, "❌ Musbat butun son kiriting:")
-                return True
-        else:
-            if not val.isdigit() or int(val) <= 0:
-                await sm(context.bot, uid, "❌ Musbat butun son kiriting (so'm):")
-                return True
-            buf["price"] = int(val)
-        new_t = {
-            "label": str(buf.get("label") or f"{int(buf['days'])} kun"),
-            "days":  int(buf["days"]),
-            "price": int(buf["price"]),
-        }
-        if is_edit and isinstance(idx, int) and 0 <= idx < len(BOT_EXTEND_TARIFFS):
-            BOT_EXTEND_TARIFFS[idx] = new_t
-            msg = "✅ <b>Tarif yangilandi!</b>"
-        else:
-            BOT_EXTEND_TARIFFS.append(new_t)
-            BOT_EXTEND_TARIFFS.sort(key=lambda x: int(x.get("days", 0)))
-            msg = "✅ <b>Yangi tarif qo'shildi!</b>"
-        save_extend_tariffs(BOT_EXTEND_TARIFFS)
-        for k in ("admin_state", "factory_tariff_buf", "factory_tariff_idx"):
-            context.user_data.pop(k, None)
-        await sm(context.bot, uid,
-                 f"{msg}\n\n"
-                 f"📅 <b>{html.escape(new_t['label'])}</b>\n"
-                 f"⏱ {new_t['days']} kun  ·  💵 {new_t['price']:,} so'm".replace(",", " "))
-        await factory_send_tariffs_admin(context.bot, uid)
-        return True
-
     if state == "delete_movie_code":
         code = text.upper().strip()
         if code not in RAM.movies:
@@ -7349,18 +6398,29 @@ async def admin_state_handler(update, context, text: str) -> bool:
     if state == "pm_auto_name":
         nm = text.strip()
         if not nm:
-            await sm(context.bot, uid, "❌ Bo'sh bo'lmasin. Nomni kiriting (masalan: Humo, Uzcard):")
+            await sm(context.bot, uid, "❌ Bo'sh bo'lmasin. Nomni kiriting (masalan: Humo):")
             return True
-        RAM.payment_methods.setdefault("auto", []).append({"name": nm, "card": ""})
+        context.user_data["pm_auto_name_v"] = nm
+        context.user_data["admin_state"] = "pm_auto_card"
+        await sm(context.bot, uid,
+            f"✅ Nom: <b>{nm}</b>\n\nEndi <b>karta raqamini</b> kiriting:")
+        return True
+
+    if state == "pm_auto_card":
+        card = re.sub(r"\s+", "", text.strip())
+        if len(card) < 8:
+            await sm(context.bot, uid, "❌ Karta raqami juda qisqa. Qayta kiriting:")
+            return True
+        nm = context.user_data.pop("pm_auto_name_v", "") or "?"
+        RAM.payment_methods.setdefault("auto", []).append({"name": nm, "card": card})
         _sync_payment_btn_labels()
         await save_now()
         context.user_data.pop("admin_state", None)
         await sm(context.bot, uid,
             f"✅ <b>Avtomatik to'lov usuli qo'shildi!</b>\n\n"
-            f"⚡ Nom: <b>{nm}</b>",
+            f"⚡ Nom: <b>{nm}</b>\n💳 Karta: <code>{card}</code>",
             admin_menu_kb(uid))
         return True
-
 
     if state == "pm_manual_name":
         nm = text.strip()
@@ -7401,6 +6461,12 @@ async def admin_state_handler(update, context, text: str) -> bool:
             admin_menu_kb(uid))
         return True
 
+    if state == "set_card":
+        RAM.card_number = text
+        await schedule_save()
+        context.user_data.pop("admin_state", None)
+        await sm(context.bot, uid, f"✅ Karta saqlandi: <code>{text}</code>", admin_menu_kb(uid))
+        return True
 
     if state == "set_admin_lichka":
         val = text.strip().lstrip("@")
@@ -9708,11 +8774,10 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .concurrent_updates(True)
-        .read_timeout(VIDEO_IO_TIMEOUT)
-        .write_timeout(VIDEO_IO_TIMEOUT)
+        .read_timeout(30)
+        .write_timeout(30)
         .connect_timeout(15)
-        .pool_timeout(60)
+        .pool_timeout(30)
         .build()
     )
 
@@ -9720,14 +8785,14 @@ def main():
     global _BOT_APP
     _BOT_APP = app
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler, block=False))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler, block=False))
-    app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler, block=False))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, sticker_handler))
     app.add_handler(MessageHandler(
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_handler, block=False))
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_handler))
     # So'rovli kanal uchun — join request handler
     from telegram.ext import ChatJoinRequestHandler
-    app.add_handler(ChatJoinRequestHandler(join_request_handler, block=False))
+    app.add_handler(ChatJoinRequestHandler(join_request_handler))
 
     # ── Har 5 daqiqada JSONBlob ga sinxron saqlash ────────
     async def _periodic_sync(context_job):
@@ -9757,12 +8822,10 @@ def main():
                     DB_STATUS.update({"storage_ok": False, "ram_only": True})
                 if DB_STATUS["fail_count"] == 2:
                     try:
-                        err_detail = html.escape(str(DB_STATUS.get("last_err_detail") or "noma'lum xato"))
                         await context_job.bot.send_message(
                             ADMIN_ID,
                             f"⚠️ <b>PostgreSQL ishlamayapti!</b>\n{now_str}\n"
-                            f"Bot RAMdan ishlayapti (ma'lumotlar yo'qolmaydi).\n"
-                            f"Xato: <code>{err_detail}</code>",
+                            f"Bot RAMdan ishlayapti (ma'lumotlar yo'qolmaydi).",
                             parse_mode="HTML")
                     except: pass
             status = "✅" if ok else "⚠️"
@@ -9779,9 +8842,7 @@ def main():
                 storage_msg = f"🟢 PostgreSQL ishlayapti — {now_str}"
             else:
                 DB_STATUS.update({"storage_ok": False, "ram_only": True, "last_err": now_str})
-                err_detail = html.escape(str(DB_STATUS.get("last_err_detail") or "noma'lum xato"))
-                storage_msg = (f"🔴 PostgreSQL ishlamayapti! Bot RAMdan ishlaydi.\n"
-                               f"   Xato: <code>{err_detail}</code>")
+                storage_msg = f"🔴 PostgreSQL ishlamayapti! Bot RAMdan ishlaydi."
             webhook_url = f"{RAILWAY_URL}{CHECKCARD_WEBHOOK_PATH}"
             await context_job.bot.send_message(
                 ADMIN_ID,
@@ -9826,10 +8887,10 @@ def main():
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query", "chat_join_request"],
-        read_timeout=VIDEO_IO_TIMEOUT,
-        write_timeout=VIDEO_IO_TIMEOUT,
+        read_timeout=30,
+        write_timeout=30,
         connect_timeout=15,
-        pool_timeout=60,
+        pool_timeout=30,
     )
 
 

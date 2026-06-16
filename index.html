@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bot Boshqaruv</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { background: var(--tg-theme-bg-color, #0f1419); color: var(--tg-theme-text-color, #fff); padding: 16px; min-height: 100vh; }
+  .card { background: var(--tg-theme-secondary-bg-color, #1a2332); border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  h2 { font-size: 16px; margin-bottom: 10px; color: #4aa3ff; }
+  .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+  .row:last-child { border: none; }
+  .row .label { color: #8b9bb4; }
+  .row .value { color: #fff; font-weight: 500; word-break: break-all; text-align: right; max-width: 60%; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .btn { background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); border: none; padding: 14px; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn.secondary { background: #2a3447; }
+  .btn.danger { background: #e74c3c; }
+  .badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge.active { background: #27ae60; }
+  .badge.expired { background: #e74c3c; }
+  input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #2a3447; background: #0f1419; color: #fff; font-size: 14px; margin-top: 6px; }
+  label { font-size: 13px; color: #8b9bb4; display: block; margin-top: 10px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="main">
+  <div class="card">
+    <h1 id="botName">Bot</h1>
+    <div style="margin-top:6px"><span id="botStatus" class="badge active">Aktiv</span></div>
+  </div>
+
+  <div class="card">
+    <h2>📊 Bot ma'lumotlari</h2>
+    <div class="row"><span class="label">ID</span><span class="value" id="iBotId">—</span></div>
+    <div class="row"><span class="label">Username</span><span class="value" id="iUsername">—</span></div>
+    <div class="row"><span class="label">Turi</span><span class="value" id="iType">—</span></div>
+    <div class="row"><span class="label">Tarif</span><span class="value" id="iTarif">—</span></div>
+    <div class="row"><span class="label">Muddat</span><span class="value" id="iExp">—</span></div>
+    <div class="row"><span class="label">Yaratilgan</span><span class="value" id="iCreated">—</span></div>
+    <div class="row"><span class="label">Admin ID</span><span class="value" id="iAdmin">—</span></div>
+  </div>
+
+  <div class="grid">
+    <button class="btn" onclick="show('settings')">⚙️ Sozlamalar</button>
+    <button class="btn secondary" onclick="show('stats')">📈 Statistika</button>
+    <button class="btn secondary" onclick="send('extend')">💎 Muddatni uzaytirish</button>
+    <button class="btn danger" onclick="send('delete')">🗑 Botni o'chirish</button>
+  </div>
+</div>
+
+<div id="settings" class="hidden">
+  <div class="card">
+    <h2>⚙️ Bot sozlamalari</h2>
+    <label>Bot Token</label>
+    <input id="sToken" type="text" />
+    <label>Admin ID</label>
+    <input id="sAdmin" type="text" />
+    <label>Bot nomi</label>
+    <input id="sName" type="text" />
+  </div>
+  <div class="grid">
+    <button class="btn" onclick="saveSettings()">💾 Saqlash</button>
+    <button class="btn secondary" onclick="show('main')">← Orqaga</button>
+  </div>
+</div>
+
+<div id="stats" class="hidden">
+  <div class="card">
+    <h2>📈 Statistika</h2>
+    <div class="row"><span class="label">Foydalanuvchilar</span><span class="value" id="stUsers">—</span></div>
+    <div class="row"><span class="label">Bugungi</span><span class="value" id="stToday">—</span></div>
+    <div class="row"><span class="label">Holat</span><span class="value" id="stStatus">—</span></div>
+  </div>
+  <button class="btn secondary" onclick="show('main')">← Orqaga</button>
+</div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready(); tg.expand();
+
+function getParams() {
+  const p = {};
+  const sp = tg.initDataUnsafe && tg.initDataUnsafe.start_param;
+  if (sp) { try { Object.assign(p, JSON.parse(atob(sp))); } catch(e) {} }
+  const u = new URLSearchParams(location.search);
+  u.forEach((v,k) => p[k] = p[k] || v);
+  return p;
+}
+
+const P = getParams();
+document.getElementById('botName').textContent = '🤖 ' + (P.name || P.username || 'Bot');
+document.getElementById('iBotId').textContent = P.bot_id || '—';
+document.getElementById('iUsername').textContent = '@' + (P.username || '—');
+document.getElementById('iType').textContent = P.type || 'Kino Bot';
+document.getElementById('iTarif').textContent = P.tarif || 'Free';
+document.getElementById('iExp').textContent = P.exp || P.left || '—';
+document.getElementById('iCreated').textContent = P.created || '—';
+document.getElementById('iAdmin').textContent = P.admin || '—';
+const st = (P.status || 'active').toLowerCase();
+const bs = document.getElementById('botStatus');
+bs.textContent = st === 'active' ? '✅ Aktiv' : '⛔ Muddati tugagan';
+bs.className = 'badge ' + (st === 'active' ? 'active' : 'expired');
+
+document.getElementById('sToken').value = P.token || '';
+document.getElementById('sAdmin').value = P.admin || '';
+document.getElementById('sName').value = P.name || P.username || '';
+
+document.getElementById('stUsers').textContent = P.users || '0';
+document.getElementById('stToday').textContent = P.today || '0';
+document.getElementById('stStatus').textContent = bs.textContent;
+
+function show(id) {
+  ['main','settings','stats'].forEach(x => document.getElementById(x).classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+}
+
+function send(action, extra) {
+  const data = Object.assign({ action: action, bot_id: P.bot_id }, extra || {});
+  tg.sendData(JSON.stringify(data));
+  tg.close();
+}
+
+function saveSettings() {
+  send('update_settings', {
+    token: document.getElementById('sToken').value.trim(),
+    admin: document.getElementById('sAdmin').value.trim(),
+    name: document.getElementById('sName').value.trim()
+  });
+}
+</script>
+</body>
+</html>
